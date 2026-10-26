@@ -1,0 +1,13 @@
+Soullink Emotion Engine
+=======================
+
+Source: https://github.com/nanlingyin/soullink-emotion-sdk
+Package: @soullink-emotion/engine
+License: MIT
+
+lib/soullink/soullink.js 由该 package 的 dist 产物（chunk-WF7NFOHV.js）转换而来，
+仅把 ESM 的 export 语法改写为 window.Soullink 全局对象，以便 Electron 以 file://
+加载的页面直接使用；引擎内部逻辑未做任何修改。
+
+Copyright (c) soullink-emotion-sdk contributors.
+Licensed under the MIT License.

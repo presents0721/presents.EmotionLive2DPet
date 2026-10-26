@@ -1,0 +1,13 @@
+﻿# 运行时数据 / 用户私有数据（不进仓库）
+out/
+Recycle/
+jm/
+meme/
+state.json
+credentials.json
+hidden.json
+trash.json
+user-props.json
+*.log
+bin/
+obj/

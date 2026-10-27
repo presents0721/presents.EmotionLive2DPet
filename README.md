@@ -2,7 +2,7 @@
 
 > ## ⚠ 版本区分（必读）
 >
-> - **本版本（5.0.0）只适配 Alife 5.0.0 及以上**（新版 WinForms + WebView2 客户端，窗口与前端通信全部改为 IAlifeApplication / alifeWindow 桥）。
+> - **本版本（5.0.1）只适配 Alife 5.0.0 及以上**（新版 WinForms + WebView2 客户端，窗口与前端通信全部改为 IAlifeApplication / alifeWindow 桥）。
 > - **Alife 4.x 用户请勿安装、勿更新到 5.0.0**：4.x 没有新的窗口 API，装上会直接编译失败（CS0246 找不到 ElectronNET 或 Alife.Client 类型）。
 > - **Alife 4.x 请继续使用 1.0.2**。客户端按「插件大版本号 ≤ 客户端大版本号」判断兼容，4.x 市场里不会提示升级到 5.0.0，也不会自动替换。
 > - 从 1.0.2 升级到 5.0.0 只需在 5.0.0 客户端里正常更新插件；角色配置、表情校准与情绪记忆保存在 Storage/<角色>/，不受影响。

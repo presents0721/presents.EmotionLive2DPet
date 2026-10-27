@@ -690,7 +690,9 @@ public class GestureInteractionModule : IPetModule, IDisposable
                     }
                     catch { }
                     try { UnregisterHotkeys(); } catch { }
-                    try { System.Windows.Forms.Application.Exit(); } catch { }
+                    // 只能结束本托盘线程的消息泵；Application.Exit() 会去关主窗口（且是在本线程上关），
+                    // 导致“是否直接关闭应用？”弹窗和跨线程访问 CoreWebView2 的崩溃。
+                    try { System.Windows.Forms.Application.ExitThread(); } catch { }
                 }, null);
             }
             else if (tray is not null)

@@ -103,6 +103,15 @@
     // 原生表情（哭哭/脸红/星星眼…）播放后要按时收回，否则会一直挂在脸上不再变化
     const NATIVE_EXPRESSION_SECONDS = 6;
     let nativeExpressionUntil = 0;
+    // 用户在外观面板里固定的表情：自动情绪不许拿别的表情把它顶掉
+    let pinnedExpressionName = null;
+    // 上一次自动触发的原生表情。情绪稳定时不能每来一条消息就重播同一张脸，
+    // 只有情绪换挡、强度明显上升、或者过了较长冷却才允许再演一次。
+    let lastNativeTrigger = { name: null, emotion: null, intensity: 0, at: -999 };
+    const NATIVE_SWITCH_COOLDOWN = 1.5;      // 情绪换挡时的防闪烁间隔
+    const NATIVE_REPEAT_COOLDOWN = 4.5;      // 同一情绪、强度明显上升时的最短间隔
+    const NATIVE_STABLE_COOLDOWN = 25;       // 情绪没变化、强度也没升时的间隔（只做低频点缀）
+    const NATIVE_INTENSITY_STEP = 0.25;      // 认为「强度明显上升」的幅度
 
     // 引擎分类器偏事件型语句，这里补一层常用口语/寒暄的兜底，避免 AI 的温和回复全都落到 neutral
     const SUPPLEMENT_RULES = [
@@ -157,6 +166,13 @@
             postMessage({type: 'calibration_report', report: (profile && profile.calibration) || null});
         } catch (e) {}
     }
+
+    // 校准面板打开时如果还没拿到报告（模块晚于首次报告加载），主动补发一次
+    messageBus.on('calibration_report_request', function() {
+        try {
+            if (runtime && runtime.profile) publishCalibration(runtime.profile);
+        } catch (e) {}
+    });
 
     function ensureRuntime() {
         if (!settings) return null;
@@ -226,6 +242,11 @@
         lastUpdateTime = null;
         lastNativeToken = -1;
         nativeExpressionUntil = 0;
+        pinnedExpressionName = null;   // 换模型后 C# 会重新下发固定表情（如果还有效）
+        lastNativeTrigger = { name: null, emotion: null, intensity: 0, at: -999 };
+        lastAutoMotionAt = -999;
+        lastAutoMotionEmotion = null;
+        activeMotionParamIds = [];
         expressionSuppressUntil = 0;
         expressionSuppressParamIds = new Set();
         motionSuppressUntil = 0;
@@ -480,9 +501,25 @@
         expressionSuppressUntil = performance.now() / 1000 + (Number(seconds) || 2.5);
     }
 
+    /** 把表情队列整段停掉：表情管理器默认让旧表情淡出 1 秒，新旧两张脸会叠在一起。 */
+    function stopNativeExpressions() {
+        if (!hookedModel) return;
+        const internal = hookedModel.internalModel;
+        const manager = internal && internal.motionManager ? internal.motionManager.expressionManager : null;
+        if (manager && typeof manager.stopAllExpressions === 'function') {
+            try { manager.stopAllExpressions(); } catch { }
+        }
+    }
+
     /** 播一个原生表情，并登记一个收回时间（否则表情会一直停在脸上）。 */
     function playNativeExpression(name) {
         if (!hookedModel || !name) return;
+        // 固定的表情优先：自动情绪/文本推断不能覆盖用户的选择；
+        // 同一个固定表情也不用重播，更不能登记 6 秒回收，否则固定表情会被自动收掉。
+        if (pinnedExpressionName) return;
+        // 原生表情整张接管：清掉按参数名合成的残留，并停掉上一张表情，避免圈圈眼叠爱心眼
+        featureOverlay = null;
+        stopNativeExpressions();
         beginExpressionSuppression(name, NATIVE_EXPRESSION_SECONDS);
         nativeExpressionUntil = performance.now() / 1000 + NATIVE_EXPRESSION_SECONDS;
         try {
@@ -497,8 +534,10 @@
     const NATIVE_EMOTION_ALIASES = {
         'soft-happy': 'happy', 'soft-positive': 'happy', 'soft-calm': 'calm',
         'soft-uneasy': 'concerned', 'soft-curious': 'confused', 'soft-low': 'sad',
-        curious: 'confused', uneasy: 'concerned', anger: 'angry',
-        joy: 'happy', sadness: 'sad', fear: 'concerned', tired: 'calm',
+        'soft-shy': 'shy', 'soft-steady': 'calm',
+        curious: 'confused', uneasy: 'concerned', anger: 'angry', anxiety: 'concerned',
+        joy: 'happy', joyful: 'happy', sadness: 'sad', fear: 'concerned', tired: 'calm',
+        affectionate: 'happy', embarrassed: 'shy', startled: 'surprised', nervous: 'concerned',
     };
 
     function nativeEmotionKey(emotion) {
@@ -510,6 +549,34 @@
         if (!runtime || !runtime.profile) return null;
         const map = runtime.profile.expressionMap;
         return (map && map[nativeEmotionKey(emotion)]) || null;
+    }
+
+    /**
+     * 自动情绪触发的原生表情要防重：同一条表情还在脸上、情绪没换、强度也没明显上升时不重播。
+     * explicit=true 用于 AI/用户点名的表情，永远立即播。
+     */
+    function maybePlayNativeExpression(name, emotion, intensity, now, explicit) {
+        if (!name || pinnedExpressionName) return false;
+        if (!explicit) {
+            const emotionKey = nativeEmotionKey(emotion);
+            // 同一个表情还在显示中：让它自然演完，不要一条消息重播一次
+            if (nativeExpressionUntil > now && lastNativeTrigger.name === String(name)) return false;
+            const sameEmotion = emotionKey === lastNativeTrigger.emotion;
+            const risen = intensity >= lastNativeTrigger.intensity + NATIVE_INTENSITY_STEP;
+            // 情绪真的换挡了，允许很快换一张脸；同一情绪则按强度是否上升分两档冷却
+            const minGap = sameEmotion
+                ? (risen ? NATIVE_REPEAT_COOLDOWN : NATIVE_STABLE_COOLDOWN)
+                : NATIVE_SWITCH_COOLDOWN;
+            if (now - lastNativeTrigger.at < minGap) return false;
+        }
+        playNativeExpression(name);
+        lastNativeTrigger = {
+            name: String(name),
+            emotion: nativeEmotionKey(emotion),
+            intensity: Number(intensity) || 0,
+            at: now,
+        };
+        return true;
     }
 
     // ---- 情绪特征叠加 ----
@@ -804,6 +871,36 @@
         '比心': 'heart', '爱心': 'heart', '指向': 'point', '指': 'point',
     };
 
+    // 模型没有 ParamArm* 时，合成手臂手势几乎看不出来；有同名/近义的原生动作就优先用原生动作。
+    // 只取「打开/出来」类，跳过「关闭/切回默认」，否则会先把姿势收回去。
+    const GESTURE_MOTION_KEYWORDS = {
+        wave: ['挥手', '招手', '打招呼', '举手'],
+        handsUp: ['举手', '双手', '欢呼'],
+        point: ['竖指', '手指', '食指', '指向'],
+        heart: ['比心', '爱心', '心心'],
+        nod: ['点头'],
+        shakeHead: ['摇头'],
+        bow: ['鞠躬', '弯腰'],
+        leanIn: ['前倾', '凑近'],
+        leanBack: ['后仰', '后退'],
+        lookAround: ['张望', '环顾'],
+        shrug: ['耸肩'],
+    };
+
+    function nativeMotionForGesture(key) {
+        if (!settings || !Array.isArray(settings.motions)) return null;
+        const words = GESTURE_MOTION_KEYWORDS[key] || [];
+        if (!words.length) return null;
+        for (const item of settings.motions) {
+            const name = `${item.name || ''} ${item.label || ''}`;
+            if (!name.trim()) continue;
+            if (/(idle|scene|loop|待机|场景)/i.test(name)) continue;
+            if (/(关闭|切回|切默认|回默认|收起|收回|close|reset)/i.test(name)) continue;
+            if (words.some((word) => name.includes(word))) return item;
+        }
+        return null;
+    }
+
     let gestureOverlay = null; // {name, startedAt, duration, frames, intensity}
 
     /** 关键帧线性插值：缺省的通道按 0（中性）处理。 */
@@ -828,11 +925,24 @@
     function startGesture(name, intensity, seconds) {
         if (!runtime || !runtime.profile) return false;
         const raw = String(name || '').trim();
-        const key = GESTURE_ALIASES[raw] || raw.toLowerCase();
+        const lowered = raw.toLowerCase();
+        // 手势表里是 lookAround/shakeHead 这类驼峰名，不能只做 toLowerCase，否则自动编排会报「未知手势」
+        const key = GESTURE_ALIASES[raw]
+            || Object.keys(GESTURES).find((gestureName) => gestureName.toLowerCase() === lowered)
+            || lowered;
         const def = GESTURES[key];
         if (!def) {
             console.warn('[Embodiment] 未知手势:', raw);
             return false;
+        }
+
+        // 先找模型自带的手势动作：手臂参数缺失时它比合成关键帧可靠得多
+        const native = nativeMotionForGesture(key);
+        if (native) {
+            console.warn('[Embodiment] 手势', key, '→ 原生动作', native.name || native.label);
+            // AI 指定的时长优先；没指定就按动作自身时长演一遍后回默认
+            playMotion(native.group, native.index, 'force', Number(seconds) > 0 ? Number(seconds) : 0);
+            return true;
         }
 
         const now = performance.now() / 1000;
@@ -894,6 +1004,7 @@
         expressionSuppressUntil = 0;
         expressionSuppressParamIds = new Set();
         if (!hookedModel) return;
+        stopNativeExpressions();
         const internal = hookedModel.internalModel;
         const manager = internal && internal.motionManager ? internal.motionManager.expressionManager : null;
         if (manager && typeof manager.resetExpression === 'function') {
@@ -950,6 +1061,9 @@
     let lastAutoGestureAt = -999;
     let lastAutoMotionAt = -999;
     let lastAutoEffectAt = -999;
+    // 原生动作比合成手势「重」，情绪没换挡时更不该反复触发
+    let lastAutoMotionEmotion = null;
+    let lastAutoMotionIntensity = 0;
 
     function maybeAutoExpress(emotion, intensity, now) {
         if (!autoPerformance || !runtime || !hookedModel) return;
@@ -957,7 +1071,32 @@
         if (!profile) return;
         const key = nativeEmotionKey(emotion);
 
-        // 1) 整段手势：头/身层任何模型都能演，手臂手势只在模型有手臂参数时参与
+        // 1) 模型自带的原生动作优先：表现力比程序化合成强，也不容易每次都是同一套手势。
+        // 但情绪稳定时不能每 8 秒就换一个姿势：换情绪/强度明显上升才用短冷却，否则走长冷却。
+        if (!gestureOverlay && now >= motionSuppressUntil && intensity >= 0.5) {
+            const emotionChanged = key !== lastAutoMotionEmotion
+                || intensity >= lastAutoMotionIntensity + 0.2;
+            const minGap = emotionChanged ? 8 : 30;
+            if (now - lastAutoMotionAt >= minGap) {
+                const map = profile.emotionMotionMap;
+                const matched = (map && map[key]) || [];
+                const pool = matched.length
+                    ? matched
+                    : (map && map.any && Math.random() < 0.4 ? map.any : null);
+                if (pool && pool.length) {
+                    const entry = pool[Math.floor(Math.random() * pool.length)];
+                    lastAutoMotionAt = now;
+                    lastAutoMotionEmotion = key;
+                    lastAutoMotionIntensity = intensity;
+                    // 这一轮已经演了原生动作，不再叠加合成手势（否则两套动作会互相顶）
+                    lastAutoGestureAt = now;
+                    console.warn('[Embodiment] 情绪动作', key, '→', entry.group, entry.index, entry.name || entry.label);
+                    playMotion(entry.group, entry.index, 'normal');
+                }
+            }
+        }
+
+        // 2) 模型没有对应原生动作时，才用合成的头/身（以及有手臂时的整段手势）兜底
         if (!gestureOverlay && now >= motionSuppressUntil && intensity >= 0.55 &&
             now - lastAutoGestureAt >= 9) {
             const pool = (AUTO_GESTURES_BY_EMOTION[key] || []).filter((name) => {
@@ -967,22 +1106,6 @@
             if (pool.length) {
                 lastAutoGestureAt = now;
                 startGesture(pool[Math.floor(Math.random() * pool.length)], 0.5 + intensity * 0.35, 0);
-            }
-        }
-
-        // 2) 模型自带的原生动作：表现力比程序化合成更强，但不要打断进行中的动作
-        if (!gestureOverlay && now >= motionSuppressUntil && intensity >= 0.6 &&
-            now - lastAutoMotionAt >= 16) {
-            const map = profile.emotionMotionMap;
-            const matched = map && map[key];
-            const pool = (matched && matched.length)
-                ? matched
-                : (map && map.any && Math.random() < 0.35 ? map.any : null);
-            if (pool && pool.length) {
-                const entry = pool[Math.floor(Math.random() * pool.length)];
-                lastAutoMotionAt = now;
-                console.warn('[Embodiment] 情绪动作', key, '→', entry.group, entry.index, entry.name);
-                playMotion(entry.group, entry.index, 'normal');
             }
         }
 
@@ -1014,6 +1137,11 @@
         paramIndexCache.clear();
         lastUpdateTime = null;
         gestureOverlay = null;
+        pinnedExpressionName = null;
+        lastNativeTrigger = { name: null, emotion: null, intensity: 0, at: -999 };
+        lastAutoMotionAt = -999;
+        lastAutoMotionEmotion = null;
+        activeMotionParamIds = [];
     });
 
     messageBus.on('embodied_settings', function (msg) {
@@ -1078,16 +1206,19 @@
             const intent = supplementIntent(classifier.classify(text), text);
             intent.intensity = clamp((Number(intent.intensity) || 0.5) * gain, 0.05, 1);
             runtime.triggerIntent(intent, now);
-            if (intent.intensity >= 0.5) startFeatureOverlay(intent.emotion, intent.intensity);
-            // 情绪够强时编排出整段动作：手势 / 模型自带动作 / 窗口位移
-            maybeAutoExpress(intent.emotion, intent.intensity, now);
 
-            // 模型自带表情（星星眼/哭哭/脸红…）作为明显可见的一层叠加，FACS 负责细节
+            // 模型自带表情（星星眼/哭哭/脸红/圈圈眼…）优先：整张表情文件比按参数名逐个合成准确，
+            // 只有模型确实没有对应表情时，才用私有特征参数补一层。
             const nativeName = nativeExpressionFor(intent.emotion);
             if (nativeName) {
-                console.warn('[Embodiment] 叠加原生表情', intent.emotion, '→', nativeName);
-                playNativeExpression(nativeName);
+                if (maybePlayNativeExpression(nativeName, intent.emotion, intent.intensity, now, false))
+                    console.warn('[Embodiment] 叠加原生表情', intent.emotion, '→', nativeName);
+            } else if (intent.intensity >= 0.5) {
+                startFeatureOverlay(intent.emotion, intent.intensity);
             }
+
+            // 情绪够强时编排出整段动作：手势 / 模型自带动作 / 窗口位移
+            maybeAutoExpress(intent.emotion, intent.intensity, now);
 
             // 用户发话后进入「等待回复」的小动作，避免站桩
             if (msg.source === 'user' && !envelopeAnalyzer.active) {
@@ -1108,7 +1239,7 @@
         const intensity = clamp(Number(msg.intensity) || 0.7, 0.05, 1);
 
         const nativeName = msg.expression || nativeExpressionFor(emotion);
-        if (nativeName) playNativeExpression(nativeName);
+        if (nativeName) maybePlayNativeExpression(nativeName, emotion, intensity, now, !!msg.expression);
         if (msg.motion && hookedModel) {
             playNamedMotion(msg.motion);
         }
@@ -1120,7 +1251,8 @@
                 contextTags: ['manual'],
                 sourceMessage: '',
             }, now);
-            startFeatureOverlay(emotion, intensity);
+            // 已经播了原生表情就不再按参数名合成同一张脸，避免把表情文件里的正确取值覆盖成 1
+            if (!nativeName) startFeatureOverlay(emotion, intensity);
         } catch (e) {
             console.warn('[Embodiment] 指定情绪表演失败', e);
         }
@@ -1148,9 +1280,9 @@
                 console.warn('[Embodiment] PetFace 基础情绪失败', e);
             }
             const nativeName = msg.expression || nativeExpressionFor(emotion);
-            if (nativeName) playNativeExpression(nativeName);
+            if (nativeName) maybePlayNativeExpression(nativeName, emotion, intensity, now, !!msg.expression);
         } else if (msg.expression) {
-            playNativeExpression(String(msg.expression));
+            maybePlayNativeExpression(String(msg.expression), null, intensity, now, true);
         }
 
         startFaceOverlay(msg, now);
@@ -1205,7 +1337,7 @@
 
     messageBus.on('native_expression', function (msg) {
         if (!msg.name) return;
-        playNativeExpression(String(msg.name));
+        maybePlayNativeExpression(String(msg.name), null, 1, performance.now() / 1000, true);
     });
 
     // 外观与表演面板的总开关：关掉后本层的情绪/FACS/视线/原生动作全部停止写参数
@@ -1233,6 +1365,13 @@
     // 用户手动固定的表情（星星眼/爱心眼/脸红…）：播放后不自动收回，并长期避让情绪层
     messageBus.on('expression_hold', function (msg) {
         if (!hookedModel || !msg || !msg.id) return;
+        const sameExpression = pinnedExpressionName === String(msg.id);
+        pinnedExpressionName = String(msg.id);
+        // 换表情时先停掉旧的；重复下发同一个固定表情则不要重启，避免每次面板操作都闪一下
+        if (sameExpression === false) {
+            featureOverlay = null;
+            stopNativeExpressions();
+        }
         try {
             const result = hookedModel.expression(String(msg.id));
             if (result && typeof result.catch === 'function') result.catch(() => {});
@@ -1245,6 +1384,7 @@
 
     // C# 侧决定收回表情（或用户手动重置）时走这里，确保避让窗口一起清掉
     messageBus.on('expression_reset', function () {
+        pinnedExpressionName = null;
         nativeExpressionUntil = 0;
         expressionSuppressUntil = 0;
         expressionSuppressParamIds = new Set();
@@ -1252,7 +1392,7 @@
 
     messageBus.on('native_motion', function (msg) {
         if (!hookedModel || !msg.group) return;
-        playMotion(String(msg.group), Number(msg.index) || 0, msg.priority);
+        playMotion(String(msg.group), Number(msg.index) || 0, msg.priority, msg.autoStopSeconds, msg.params);
     });
 
     // AI 指定的整段手势：挥手 / 点头 / 鞠躬 / 比心 / 举双手 / 耸肩 …
@@ -1282,7 +1422,49 @@
         pointer.height = Number(msg.height) || 0;
     });
 
-    function playMotion(group, index, priority) {
+    /** 停掉所有动作并回默认姿势；动作文件大多声明 Loop=true，不主动停就会一直挂着。 */
+    function stopNativeMotions() {
+        if (!hookedModel) return;
+        const manager = hookedModel.internalModel && hookedModel.internalModel.motionManager;
+        if (manager && typeof manager.stopAllMotions === 'function') {
+            try { manager.stopAllMotions(); } catch { }
+        }
+    }
+
+    // 动作参数不会自己回默认：停掉动作后要把它们写回默认值，否则手/道具会停在最后一帧
+    let activeMotionParamIds = [];
+    function rememberMotionParams(ids) {
+        if (!Array.isArray(ids)) return;
+        for (const id of ids) {
+            if (id && activeMotionParamIds.includes(id) === false) activeMotionParamIds.push(id);
+        }
+    }
+    function resetMotionParams() {
+        const ids = activeMotionParamIds;
+        activeMotionParamIds = [];
+        if (!ids.length || !hookedModel) return;
+        const core = hookedModel.internalModel && hookedModel.internalModel.coreModel;
+        if (!core) return;
+        for (const id of ids) {
+            let index = -1;
+            try { index = core.getParameterIndex(id); } catch { index = -1; }
+            if (!(index >= 0)) continue;
+            let def = 0;
+            try {
+                if (typeof core.getParameterDefaultValue === 'function') {
+                    const value = Number(core.getParameterDefaultValue(index));
+                    if (Number.isFinite(value)) def = value;
+                }
+            } catch { }
+            try { core.setParameterValueById(id, def); } catch { }
+        }
+    }
+    function stopAndResetMotions() {
+        stopNativeMotions();
+        resetMotionParams();
+    }
+
+    function playMotion(group, index, priority, autoStopSeconds, paramIds) {
         if (!hookedModel) return;
         if (priority !== 'idle') {
             beginMotionSuppression(group, index);
@@ -1290,11 +1472,48 @@
         const value = priority === 'force'
             ? MotionPriority.FORCE
             : (priority === 'idle' ? MotionPriority.IDLE : MotionPriority.NORMAL);
+        // 用全局序号作废旧动作的自动停止计时，避免把后面新播的动作也停掉
+        const seq = window.__petMotionSeq = (window.__petMotionSeq || 0) + 1;
+        const entry = (settings && settings.motions || []).find((item) =>
+            String(item.group) === String(group) && Number(item.index) === Number(index));
+        if (priority !== 'idle') {
+            rememberMotionParams(Array.isArray(paramIds) && paramIds.length
+                ? paramIds
+                : ((entry && entry.params) || []));
+        }
         try {
             const result = hookedModel.motion(group, index, value);
             if (result && typeof result.catch === 'function') result.catch(() => {});
         } catch (e) {
             console.warn('[Embodiment] 播放原生动作失败', group, index, e);
+        }
+
+        if (priority === 'idle') return;
+        let after = Number(autoStopSeconds);
+        let resetAfter = after;
+        const duration = Number(entry && entry.duration) || 0;
+        const loops = !!(entry && entry.loop);
+        // 循环动作先播一遍就停住、保持最后一帧，到请求时长再复位；否则会反复「举起→放下」
+        if (after > 0 && loops && duration > 0.5 && after > duration) {
+            resetAfter = Math.min(after, 30);
+            after = Math.max(0.4, duration - 0.1);
+        }
+        if (!(after > 0) && duration > 0.5) {
+            after = Math.min(duration + 0.3, 20);
+            resetAfter = after;
+        }
+        if (!(after > 0)) return;
+        resetAfter = resetAfter > 0 ? Math.min(resetAfter, 30) : after;
+        setTimeout(function() {
+            if (window.__petMotionSeq !== seq) return;
+            stopNativeMotions();
+            if (resetAfter <= after) resetMotionParams();
+        }, after * 1000);
+        if (resetAfter > after) {
+            setTimeout(function() {
+                if (window.__petMotionSeq !== seq) return;
+                resetMotionParams();
+            }, resetAfter * 1000);
         }
     }
 

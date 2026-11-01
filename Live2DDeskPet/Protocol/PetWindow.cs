@@ -49,7 +49,11 @@ public sealed class PetWindow(IAlifeApplication alifeApplication, StorageSystem 
 
     public Task ShowAsync() => window?.ShowAsync() ?? Task.CompletedTask;
     public Task HideAsync() => window?.HideAsync() ?? Task.CompletedTask;
-    public Task SetTopMostAsync(bool topMost) => window?.SetTopMostAsync(topMost) ?? Task.CompletedTask;
+    public Task SetTopMostAsync(bool topMost)
+    {
+        topmostEnabled = topMost;
+        return window?.SetTopMostAsync(topMost) ?? Task.CompletedTask;
+    }
 
     /// <summary>null=整窗可交互，空数组=整窗穿透，数组=仅这些窗口内区域可交互。</summary>
     public Task SetInputRegionsAsync(Rectangle[]? regions) => window?.SetInputRegionsAsync(regions) ?? Task.CompletedTask;
@@ -71,6 +75,9 @@ public sealed class PetWindow(IAlifeApplication alifeApplication, StorageSystem 
 
     IAlifeWindow? window;
     CancellationTokenSource? cancellationTokenSource;
+    CancellationTokenSource? topmostCts;
+    bool topmostEnabled = true;
+    bool topmostErrorLogged;
     Rectangle bounds;
     Point position;
     Size screenSize;
@@ -152,6 +159,11 @@ public sealed class PetWindow(IAlifeApplication alifeApplication, StorageSystem 
             //唤醒窗口（开始加载页面）
             await window.Launch();
 
+            // Windows 的任务栏/全屏窗口/其他置顶窗会把桌宠压到下面：只在创建时设一次 TopMost 不够，
+            // 需要周期重申（旧版桌宠模块也是按 500ms 拉回一次）。
+            topmostCts = new CancellationTokenSource();
+            KeepOnTopLoop(topmostCts.Token);
+
             //等待渲染进程初始化完成，确保 JS 已加载并能通讯后再继续后续消息交互
             using CancellationTokenSource initTimeout = new(TimeSpan.FromSeconds(30));
             try
@@ -165,6 +177,17 @@ public sealed class PetWindow(IAlifeApplication alifeApplication, StorageSystem 
                     ? $"桌宠窗口前端已开始执行，但 30 秒内没有完成初始化（多半是 lib 资源缺失、WebGL 不可用或前端脚本报错）。请看日志中的 [桌宠前端/...] 行。URL：{url}"
                     : $"桌宠窗口 30 秒内没有加载出页面（index.html 或 lib 目录缺失，或被安全软件拦截）。URL：{url}");
             }
+        }
+        catch
+        {
+            // 初始化失败时窗口可能不会被正常 Dispose，先把自己启动的置顶循环停掉
+            if (topmostCts != null)
+            {
+                await topmostCts.CancelAsync();
+                topmostCts.Dispose();
+                topmostCts = null;
+            }
+            throw;
         }
         finally
         {
@@ -187,6 +210,17 @@ public sealed class PetWindow(IAlifeApplication alifeApplication, StorageSystem 
                 storage.SetObject(windowBoundsKey, bounds);
         }
         catch (Exception e) { AlifeLog.LogWarning("PetWindow 保存位置失败: " + e.Message); }
+
+        try
+        {
+            if (topmostCts != null)
+            {
+                await topmostCts.CancelAsync();
+                topmostCts.Dispose();
+                topmostCts = null;
+            }
+        }
+        catch (Exception e) { AlifeLog.LogWarning("PetWindow 停止置顶维持失败: " + e.Message); }
 
         try
         {
@@ -267,6 +301,34 @@ public sealed class PetWindow(IAlifeApplication alifeApplication, StorageSystem 
                 try { await Task.Delay(500, cancellationToken); }
                 catch (OperationCanceledException) { break; }
             }
+        }
+    }
+
+    /// <summary>每 500ms 重申一次置顶；失败只记一次日志，避免刷屏。</summary>
+    async void KeepOnTopLoop(CancellationToken cancellationToken)
+    {
+        while (cancellationToken.IsCancellationRequested == false)
+        {
+            try
+            {
+                if (topmostEnabled && window != null)
+                {
+                    await window.SetTopMostAsync(true);
+                    topmostErrorLogged = false;
+                }
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception e)
+            {
+                if (topmostErrorLogged == false)
+                {
+                    topmostErrorLogged = true;
+                    AlifeLog.LogWarning("维持桌宠置顶失败: " + e.Message);
+                }
+            }
+
+            try { await Task.Delay(500, cancellationToken); }
+            catch (OperationCanceledException) { break; }
         }
     }
 

@@ -135,7 +135,7 @@ function injectHTML(html) {
 // ---- 加载模型 ----
 
 messageBus.on('load', function (msg) {
-    loadModel(msg.url, msg.pins);
+    loadModel(msg.url, msg.pins, msg.hideParts);
 });
 
 // 创建渲染器失败（显卡驱动异常 / 远程桌面或虚拟机没有 WebGL）时页面会直接停在这里，
@@ -148,8 +148,9 @@ try {
         resizeTo: window,
         transparent: true,
         backgroundAlpha: 0,
-        // 按屏幕 DPI 渲染：不设的话画布按 1 倍像素画，再被系统放大到实际显示尺寸 → 整只模型发糊
-        resolution: window.devicePixelRatio || 1,
+        // 按屏幕 DPI 渲染：不设的话画布按 1 倍像素画，再被系统放大到实际显示尺寸 → 整只模型发糊。
+        // 这里再叠加 2 倍超采样（上限 3 倍），模型被放大/贴脸时边缘和线条更清晰（只影响画布像素，不增加显存）。
+        resolution: Math.min(3, (window.devicePixelRatio || 1) * 2),
         autoDensity: true,
         preserveDrawingBuffer: true, // 保留帧缓冲，允许读取像素（生成人形掩码）
     });
@@ -422,6 +423,53 @@ messageBus.on('pet_window_effect', function (msg) {
 // 参数名兼容两种大小写（桥接用 Newtonsoft 默认契约，记录类型会发成 Id/Value）。
 var staticPins = [];      // 水印这类加载时固定的参数
 var dynamicPins = {};     // 换装开关：运行中可随时改，按参数 ID 覆盖
+var hiddenParts = [];     // 按模型配置隐藏的部件（模型目录 _tsumi.hideparts.json）
+var hiddenDrawables = []; // 隐藏部件解析出的 drawable 下标
+
+// 把配置里的部件 ID / drawable 下标解析成要隐藏的 drawable：
+// 部件级透明度会把遮罩一起清掉，这里只压 drawable 的 color pass；
+// 遮罩 pass 不看 drawable opacity，所以被遮罩的鼻子/高光仍会照常显示。
+function resolveHiddenDrawables(core) {
+    hiddenDrawables = [];
+    var m = core && core._model;
+    if (!m || !m.drawables || !m.drawables.parentPartIndices) return;
+    if (hiddenParts.length === 0) return;
+    var dr = m.drawables;
+    var todo = [];
+    // 数字条目直接当 drawable 下标；字符串条目按部件 ID 展开成其全部 drawable
+    for (var h = 0; h < hiddenParts.length; h++) {
+        var entry = hiddenParts[h];
+        if (/^\d+$/.test(entry)) {
+            hiddenDrawables.push(Number(entry));
+            continue;
+        }
+        todo.push(entry);
+    }
+    if (todo.length > 0 && m.parts && m.parts.ids) {
+        var ids = m.parts.ids, parent = dr.parentPartIndices;
+        for (var p = 0; p < ids.length; p++) {
+            var hit = false;
+            for (var t = 0; t < todo.length; t++) {
+                if (todo[t] === String(ids[p])) { hit = true; break; }
+            }
+            if (!hit) continue;
+            for (var d = 0; d < dr.count; d++) {
+                if (parent[d] === p) hiddenDrawables.push(d);
+            }
+        }
+    }
+    if (hiddenDrawables.length > 0)
+        console.warn('[Pet] 隐藏 drawable: ' + hiddenDrawables.join(','));
+}
+
+function parseParts(parts) {
+    var list = [];
+    if (!parts) return list;
+    for (var i = 0; i < parts.length; i++) {
+        if (parts[i]) list.push(String(parts[i]));
+    }
+    return list;
+}
 
 function parsePins(pins) {
     var list = [];
@@ -456,7 +504,21 @@ function installPinHook(core) {
                 console.warn('[Pet] 换装参数写入失败:', id, e);
             }
         }
-        return rawUpdate();
+        var result = rawUpdate();
+        // drawable 透明度在 update 里会被模型重算，更新完再压 0，本帧渲染即生效
+        if (hiddenDrawables.length > 0) {
+            var dr = core._model && core._model.drawables;
+            if (dr && dr.opacities) {
+                for (var h = 0; h < hiddenDrawables.length; h++) {
+                    try {
+                        dr.opacities[hiddenDrawables[h]] = 0;
+                    } catch (e) {
+                        console.warn('[Pet] 隐藏 drawable 失败:', hiddenDrawables[h], e);
+                    }
+                }
+            }
+        }
+        return result;
     };
 }
 
@@ -494,8 +556,8 @@ messageBus.on('outfit_pins', function (msg) {
     setDynamicPins((msg && msg.items) || []);
 });
 
-async function loadModel(url, pins) {
-    console.warn('[Pet] pet.js 已加载；本次固定参数 = ' + JSON.stringify(pins || []));
+async function loadModel(url, pins, hideParts) {
+    console.warn('[Pet] pet.js 已加载；本次固定参数 = ' + JSON.stringify(pins || []) + '，隐藏部件 = ' + JSON.stringify(hideParts || []));
     console.log('[Pet] Loading model:', url);
     if (model) {
         // 先通知具身层卸载旧模型（它挂在旧模型内部模型上的钩子必须摘掉），再移除
@@ -517,6 +579,8 @@ async function loadModel(url, pins) {
         return;
     }
     app.stage.addChild(model);
+    hiddenParts = parseParts(hideParts);
+    resolveHiddenDrawables(model.internalModel.coreModel);
     applyParamPins(pins);
     
     var updateLayout = function () {

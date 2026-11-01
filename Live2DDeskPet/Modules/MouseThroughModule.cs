@@ -69,7 +69,7 @@ public class MouseThroughModule : IPetModule, IDisposable
     // 上报全部桌宠按钮位置（窗口内坐标），供主进程穿透判定 + 靠近显示。
     // 显式列出所有按钮 id（避免选择器引号在 C# 字符串中的转义问题），模块未加载时跳过、轮询补齐。
     function reportBtns() {
-        var ids = ['lock-btn', 'input-toggle-btn', 'pet-btn', 'pet-help-btn', 'pet-height-btn', 'region-toggle-btn', 'region-edit-btn', 'pet-settings-btn', 'resize-btn'];
+        var ids = ['lock-btn', 'input-toggle-btn', 'pet-btn', 'pet-height-btn', 'region-toggle-btn', 'region-edit-btn', 'pet-settings-btn', 'resize-btn'];
         for (var i = 0; i < ids.length; i++) {
             var el = document.getElementById(ids[i]);
             if (!el) continue;
@@ -87,7 +87,7 @@ public class MouseThroughModule : IPetModule, IDisposable
     // 距离判定在主进程（全局光标轮询），因为穿透态下前端收不到 mousemove。
     public const string ProximityJs = @"
 (function() {
-    var ids = ['lock-btn', 'input-toggle-btn', 'pet-btn', 'pet-help-btn', 'pet-height-btn', 'region-toggle-btn', 'resize-btn'];
+    var ids = ['lock-btn', 'input-toggle-btn', 'pet-btn', 'pet-height-btn', 'region-toggle-btn', 'resize-btn'];
     var btns = {};
     // 动态获取按钮元素（模块加载顺序不定，首次可能拿不到，轮询补齐）
     function refresh() {

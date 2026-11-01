@@ -11,6 +11,9 @@ namespace presents.EmotionLive2DPet;
 /// <summary>开关面板记忆：服饰/形态开关、固定表情、固定动作，以及「具身表演」总开关。</summary>
 public class OutfitMemory
 {
+    /// <summary>这条记忆属于哪个模型。换模型后参数 ID 与表情名都变了，整条作废才不会把旧开关钉到新模型上。</summary>
+    public string? ModelName { get; set; }
+
     /// <summary>键是参数 ID。0=显示/穿上，1=隐藏/脱下；没有记录表示模型默认状态。</summary>
     public Dictionary<string, int> States { get; set; } = new();
 
@@ -55,7 +58,8 @@ public record MotionOption(string Key, string Name, string Group, int Index, dou
 /// 用户可手动固定表情、动作与服饰；关掉「具身表演」后情绪层不再抢参数，固定的表演会一直保持。
 /// AI 侧通过 PetOutfit 工具控制服饰/形态开关，表情与动作沿用 Expression / Motion 工具。
 /// </summary>
-public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, StorageSystem storage, PetStorageKey storageKey)
+public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, StorageSystem storage,
+    PetStorageKey storageKey, ExpressionModule expressionModule)
     : IPetModule, IDisposable
 {
     // 开关类动词：命中即视为「可切换」的开关，而不是普通情绪表情
@@ -77,11 +81,11 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
     // 只用于判断「写 1 是藏起来」，不参与标签清洗：否则「脱衣服」会被洗成「衣服」，和真正的衣服开关重名
     static readonly string[] HideMarkers = [.. HideVerbs, "脱", "脫"];
 
-    // 服饰部件名词：兽耳/尾巴/碎发/发卡/裙摆/光环…；单字「耳」「尾」兼容「7兔兔耳」这类参数名
+    // 服饰部件名词：兽耳/尾巴/碎发/发卡/裙摆/光环…；单字「耳」兼容「7兔兔耳」这类参数名
     static readonly string[] OutfitNouns =
     [
         "兽耳", "獸耳", "猫耳", "貓耳", "兔耳", "狐耳", "狗耳", "精灵耳", "耳朵", "耳",
-        "尾巴", "尾",
+        "尾巴", "しっぽ", "尻尾",
         "兽角", "獸角", "犄角", "独角", "龙角", "龍角", "恶魔角", "角饰",
         "碎发", "刘海", "瀏海", "前发", "前髪", "呆毛", "发夹", "发卡", "髮夾", "发饰", "发带", "发箍", "头箍", "头饰",
         "马尾", "双马尾", "雙马尾", "短发", "长发", "发型", "卷发", "挑染",
@@ -108,10 +112,11 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
     static readonly string[] ActionNouns =
     [
         "前倾", "前傾", "倾身", "侧身", "侧头", "歪头", "低头", "抬头", "转头",
-        "比心", "比耶", "剪刀手", "举手", "挥手", "摆手", "招手", "叉腰", "抱胸", "抱臂", "托腮", "猫爪", "拳头", "敬礼", "加油",
+        "比心", "比耶", "剪刀手", "举手", "挥手", "摆手", "招手", "叉腰", "抱胸", "抱臂", "托腮", "抚胸", "捂胸", "猫爪", "拳头", "敬礼", "加油",
         "蹲", "坐", "站", "跳", "转圈", "摇头", "点头", "伸懒腰", "趴", "躺", "伸", "抓", "戳",
-        "q版", "Q版", "qq人", "q版人", "q版化", "大头", "变小", "大小变", "变身", "形态", "形態", "兽形", "兽态", "拟态", "幼化", "成人化",
-        "pose", "lean", "sit", "kneel", "wave", "point", "peace", "chibi", "squat", "stand", "form",
+        "竖指", "食指", "手指", "手势", "摸头", "摸脸", "捧脸", "托脸", "扶额", "遮脸", "胳膊",
+        "q版", "Q版", "qq人", "q版人", "q版化", "大头", "变小", "大小变", "体型", "体形", "变身", "形态", "形態", "兽形", "兽态", "拟态", "幼化", "成人化",
+        "pose", "lean", "sit", "kneel", "wave", "point", "peace", "finger", "chibi", "squat", "stand", "form",
         "ポーズ", "ちび", "座り", "しゃがみ", "手振り",
     ];
 
@@ -119,12 +124,13 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
     static readonly string[] ExpressionNouns =
     [
         "爱心眼", "愛心眼", "星星眼", "心心眼", "眼冒", "冒星", "晕晕", "晕眩", "眩晕", "頭暈", "头晕",
+        "圈圈", "蚊香", "晕圈", "＞＜", "> <", "屑", "冷汗", "加载", "载入", "兔牙", "大牙",
         "脸红", "臉紅", "赤面", " blush", "害羞", "羞涩", "羞澀",
         "哭", "泪", "淚", "泣", "生气", "生氣", "怒", "愤怒", "黑脸", "黑臉", "阴影", "陰影", "阴暗", "无语", "無語",
         "笑", "微笑", "开心", "開心", "高兴", "汗水", "汗", "流汗", "白眼", "高光", "问号", "問號", "音符",
         "花痴", "花癡", "爱心", "愛心", "星星", "心", "眼", "泪眼", "泪目", "閉眼", "闭眼", "半睁", "眨眼",
         "heart", "star", "blush", "dizzy", "cry", "tear", "angry", "sad", "smile", "shy", "sweat",
-        "question", "note", "shadow", "spiral", "love", "wink", "glasses",
+        "question", "note", "shadow", "spiral", "love", "wink", "glasses", "swirl",
         "ハート", "星", "赤面", "涙", "怒", "笑", "照れ", "ぐるぐる", "汗", "ウインク",
     ];
 
@@ -134,6 +140,22 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
         "摆", "擺", "摇", "搖", "晃", "动", "動", "挥", "揮", "转", "轉", "跳", "走",
         "举", "舉", "伸", "握", "指", "拍", "摸", "抱", "戳", "扶", "靠", "躺", "蹲", "歪",
     ];
+
+    // 「开闭/开关」也常出现在眼睛、嘴巴、待机动画这类参数上；它们不是外观开关，
+    // 钉住会把眨眼、口型或待机动作整段冻住（DeepSeek 公皮/零号机等模型都有这种命名）。
+    static readonly string[] FaceSwitchWords =
+    [
+        "眼", "目", "まばたき", "瞳", "眼球", "eye", "眉", "睫毛", "鼻", "嘴", "口", "mouth", "jaw",
+        "下巴", "舌", "牙", "teeth", "cheek", "blush", "breath", "呼吸", "视线", "視線",
+        "angle", "角度", "brow", "blink",
+    ];
+
+    // 眼睛/嘴/待机动画/物理等参数分组：名字里即使带「开关/开闭」，也不该进外观开关列表
+    static readonly HashSet<string> NonSwitchGroups = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "眼睛", "eyes", "嘴", "mouth", "眉", "brows", "五官物理", "effects", "position", "head", "body",
+        "breasts", "physics", "动画参数", "待机动画", "身体轴", "控制器", "手臂",
+    };
 
     static readonly string[] LabelStripWords = SwitchVerbs.Concat(HideVerbs).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 
@@ -155,6 +177,8 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
     bool autoPerformance = true;
     string? pinnedExpression;
     string? pinnedMotion;
+    /// <summary>当前内存里的开关状态属于哪个模型；换模型时用它判断是否需要整体清空。</summary>
+    string? stateModelName;
 
     public string CssCode => @"
 #pet-outfit-panel {
@@ -236,6 +260,7 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
     var tab = 'expression';
     var motionTimer = null;
     var currentMotionKey = null;
+    var currentMotionParams = [];
 
     function pinStateText(v) {
         if (v === 1) return '隐藏';
@@ -292,10 +317,12 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
             });
         } else if (tab === 'action') {
             if (state.motions.length) {
-                section('动作文件（循环播放）');
+                section('动作文件（点击固定 / 再点取消）');
                 state.motions.forEach(function(it) {
                     addRow(it.label, it.active ? '循环中' : '', { kind: 'motion', key: it.key, active: it.active });
                 });
+                // 很多 motion3 声明了 Loop=true，固定或调用后会一直保持抬手/换道具的状态
+                addRow('回到默认姿势', '停止动作', { kind: 'motion_reset', key: 'reset' });
             }
             if (state.actions.length) {
                 section('姿势表情（一直保持）');
@@ -351,14 +378,42 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
         renderList();
     }
 
-    function stopMotionLoop() {
+    // 动作参数不会自己回默认：停掉固定动作后写回默认值，否则手/道具停在最后一帧
+    function resetMotionParams(ids) {
+        if (!ids || !ids.length) return;
+        try {
+            var core = model && model.internalModel ? model.internalModel.coreModel : null;
+            if (!core) return;
+            for (var i = 0; i < ids.length; i++) {
+                var idx = -1;
+                try { idx = core.getParameterIndex(ids[i]); } catch (e) { idx = -1; }
+                if (idx < 0) continue;
+                var def = 0;
+                try {
+                    if (typeof core.getParameterDefaultValue === 'function') {
+                        var d = Number(core.getParameterDefaultValue(idx));
+                        if (isFinite(d)) def = d;
+                    }
+                } catch (e) {}
+                try { core.setParameterValueById(ids[i], def); } catch (e) {}
+            }
+        } catch (e) {}
+    }
+    function stopMotionLoop(force) {
         if (motionTimer) { clearInterval(motionTimer); motionTimer = null; }
+        // 没有本模块固定的动作时，不要顺手停掉 AI 刚播的原生动作
+        var owned = currentMotionKey !== null || currentMotionParams.length > 0;
         currentMotionKey = null;
+        if (owned === false && force !== true) return;
+        // 作废别处排队的「动作自动停止」，避免旧计时停掉接下来新播的动作
+        window.__petMotionSeq = (window.__petMotionSeq || 0) + 1;
         // 取消固定时把动作也停掉，否则自循环动作（Idle 之类）会一直播下去
         try {
             var manager = model && model.internalModel ? model.internalModel.motionManager : null;
             if (manager && typeof manager.stopAllMotions === 'function') manager.stopAllMotions();
         } catch (e) {}
+        resetMotionParams(currentMotionParams);
+        currentMotionParams = [];
     }
     function startMotionLoop(msg) {
         if (motionTimer) { clearInterval(motionTimer); motionTimer = null; }
@@ -369,9 +424,14 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
         var key = group + '|' + index;
         if (key === currentMotionKey) return;   // 还是同一个固定动作，别打断它
         currentMotionKey = key;
+        // 换固定动作前先把上一个动作占用的参数复位，避免两套姿势叠在一起
+        resetMotionParams(currentMotionParams);
+        currentMotionParams = (msg && msg.params) || [];
 
         var period = Math.max(1, (Number(msg.duration) || 3) - 0.2) * 1000;
         function play() {
+            // 固定动作优先级最高：作废旧的动作自动停止计时
+            window.__petMotionSeq = (window.__petMotionSeq || 0) + 1;
             try { model.motion(group, index, PIXI.live2d.MotionPriority.FORCE); } catch (e) {}
         }
         play();
@@ -381,6 +441,7 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
 
     messageBus.on('switch_list', function(msg) { applyList(msg); });
     messageBus.on('motion_loop', function(msg) { startMotionLoop(msg); });
+    messageBus.on('motion_reset', function() { stopMotionLoop(true); });
     // ---- 面板位置：默认贴右侧、可拖标题栏移动、位置记忆；半透明避免挡住人物 ----
     var POS_KEY = 'petOutfitPanelPos';
     var dragOffset = null;
@@ -446,8 +507,8 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
         } catch (e) {}
         if (window.__petReportUi) window.__petReportUi();
     });
-    messageBus.on('pet:model-unloading', function() { stopMotionLoop(); });
-    messageBus.on('pet:model-ready', function() { currentMotionKey = null; });
+    messageBus.on('pet:model-unloading', function() { stopMotionLoop(true); });
+    messageBus.on('pet:model-ready', function() { currentMotionKey = null; currentMotionParams = []; });
 
     document.addEventListener('click', function(e) {
         var t = e.target && e.target.closest ? e.target.closest('[data-outfit],[data-act],[data-tab],[data-kind]') : null;
@@ -485,6 +546,10 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
         var kind = t.getAttribute('data-kind');
         var key = t.getAttribute('data-key');
         if (!kind || !key) return;
+        if (kind === 'motion_reset') {
+            postMessage({type:'motion_reset'});
+            return;
+        }
         if (kind === 'pin') {
             var current = parseInt(t.getAttribute('data-state'), 10);
             if (isNaN(current)) current = -1;
@@ -533,6 +598,8 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
             string name = parameter.Name ?? "";
             if (name.Length == 0) continue;
             if (HasSwitchVerb(name) == false || HasPoseWord(name)) continue;
+            // 眼睛/下巴/待机动画/手臂物理这类参数不是外观开关，钉住会让本人僵掉
+            if (IsFaceOrAnimationParameter(parameter)) continue;
             // 认不出分类的开关也收进「其他」，避免命名奇怪的模型部件/形态开关直接消失
             SwitchCategory category = Classify(name) ?? SwitchCategory.Other;
             items.Add(new OutfitItem(id, MakeLabel(name, name), name, name, 1, !HasHideWord(name), category));
@@ -564,7 +631,13 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
                 _ => others,
             };
             if (seen.Add(sourceName))
-                bucket.Add(new ExpressionOption(sourceName, OptionLabel(sourceName, expression, names), category));
+            {
+                // 模型作者在 VTS 热键里的名字通常比文件名更贴近用途（「屑」「抚胸手打开」）
+                string label = expression.Label is { Length: > 0 } hotkeyLabel
+                    ? hotkeyLabel
+                    : OptionLabel(sourceName, expression, names);
+                bucket.Add(new ExpressionOption(sourceName, label, category));
+            }
         }
         return expressions.Concat(actions).Concat(others).ToList();
     }
@@ -581,6 +654,18 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
         return sourceName;
     }
 
+    /// <summary>
+    /// 这个表情是不是「状态型」（体型/换装/姿势开关），而不是哭哭/爱心眼这类一次性表情。
+    /// 状态型通过 Expression 触发时默认一直保持，否则换完体型几秒就被自动收回。
+    /// </summary>
+    public bool IsPersistentExpression(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        ExpressionOption? option = DetectExpressionOptions()
+            .FirstOrDefault(item => string.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase));
+        return option != null && option.Category is SwitchCategory.Action or SwitchCategory.Outfit;
+    }
+
     /// <summary>模型自带的动作文件（可循环播放）。</summary>
     public List<MotionOption> DetectMotionOptions()
     {
@@ -594,7 +679,11 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
                 loop = meta.Loop;
                 duration = meta.Duration > 0.5 ? meta.Duration : 3;
             }
-            options.Add(new MotionOption($"{entry.Value.Group}|{entry.Value.Index}", entry.Key, entry.Value.Group,
+            string label = metadata.MotionFiles.FirstOrDefault(file =>
+                               string.Equals(file.Name, entry.Key, StringComparison.OrdinalIgnoreCase))?.Label is { Length: > 0 } hotkeyLabel
+                ? hotkeyLabel
+                : entry.Key;
+            options.Add(new MotionOption($"{entry.Value.Group}|{entry.Value.Index}", label, entry.Value.Group,
                 entry.Value.Index, duration, loop));
         }
         return options;
@@ -608,7 +697,20 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
             subscribed = true;
         }
         LoadStates();
+        stateModelName = metadata.ModelName;
+        PruneStates();
         ApplyToFrontend();
+    }
+
+    /// <summary>丢掉已不属于任何开关的记忆（识别规则更新或模型换过），否则会继续每帧钉住旧参数。</summary>
+    void PruneStates()
+    {
+        HashSet<string> known = new(AllItems().Select(item => item.ParamId), StringComparer.OrdinalIgnoreCase);
+        List<string> stale = states.Keys.Where(key => known.Contains(key) == false).ToList();
+        if (stale.Count == 0) return;
+        foreach (string key in stale) states.Remove(key);
+        AlifeLog.LogInformation($"[桌宠] 清理不再识别的开关状态 {stale.Count} 个：{string.Join("、", stale)}");
+        SaveStates();
     }
 
     /// <summary>AI / UI 切换：name 可以是参数 ID、显示名，或模型表情原名（如「隐藏外套」）。</summary>
@@ -651,10 +753,19 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
     {
         if (type == "loaded")
         {
-            // 换模型后参数 ID 全变了：清掉临时开关，并校验固定的表情/动作在新模型里是否还存在
+            // 换模型后参数 ID 全变了：同一 ID 在别的模型里可能是完全不同的部件，不能带着旧状态过去
             extraItems.Clear();
+            if (string.Equals(stateModelName, metadata.ModelName, StringComparison.OrdinalIgnoreCase) == false)
+            {
+                states.Clear();
+                pinnedExpression = null;
+                pinnedMotion = null;
+                stateModelName = metadata.ModelName;
+                SaveStates();
+            }
             if (ExpressionExists(pinnedExpression) == false) pinnedExpression = null;
             if (MotionExists(pinnedMotion) == false) pinnedMotion = null;
+            PruneStates();
             ApplyToFrontend();
             return;
         }
@@ -683,6 +794,16 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
             ApplyToFrontend();
             return;
         }
+        if (type == "motion_reset")
+        {
+            // 面板「回到默认姿势」：清掉固定的动作，也停掉 AI 设成一直循环的动作
+            pinnedMotion = null;
+            expressionModule.CancelMotionHold();
+            SaveStates();
+            bridge.SendMessage("motion_reset");
+            ApplyToFrontend();
+            return;
+        }
         if (type != "outfit_toggle") return;
 
         string key2 = data.TryGetProperty("key", out JsonElement outfitKey) ? (outfitKey.GetString() ?? "") : "";
@@ -700,18 +821,29 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
 
         // 取消固定（或没有固定）时要把表情收回去，否则长期避让会让它一直挂在脸上
         if (string.IsNullOrEmpty(pinnedExpression))
+        {
+            expressionModule.ReleaseExternalHold();
             bridge.SendMessage("expression_reset");
+        }
         else if (ExpressionExists(pinnedExpression))
+        {
+            // 面板固定期间让 ExpressionModule 停止它自己的自动回收：
+            // 否则前面一次性表情的 5 秒计时会把刚固定的体型/换装表情收掉（表现为「维持几秒就弹回去」）
+            expressionModule.HoldExternally(pinnedExpression);
             bridge.SendMessage("expression_hold", new { id = pinnedExpression });
+        }
 
         MotionOption? motion = DetectMotionOptions().FirstOrDefault(option =>
             string.Equals(option.Key, pinnedMotion, StringComparison.OrdinalIgnoreCase));
+        MotionFileItem? motionFile = motion == null ? null : metadata.MotionFiles.FirstOrDefault(file =>
+            file.Group == motion.Group && file.Index == motion.Index);
         bridge.SendMessage("motion_loop", new {
             enabled = motion != null,
             group = motion?.Group ?? "",
             index = motion?.Index ?? 0,
             duration = motion?.Duration ?? 3,
             loop = motion?.Loop ?? false,
+            @params = motionFile?.Params.ToArray() ?? Array.Empty<string>(),
         });
 
         SendAll();
@@ -878,6 +1010,15 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
 
     static bool HasPoseWord(string text) => ContainsAny(text, PoseWords);
 
+    /// <summary>眼睛/嘴/待机动画/物理参数不是外观开关；名字里带外观名词（眼罩、眼镜）的仍保留。</summary>
+    static bool IsFaceOrAnimationParameter(CdiParameter parameter)
+    {
+        string name = parameter.Name ?? "";
+        if (HasOutfitNoun(name)) return false;
+        if (NonSwitchGroups.Contains(parameter.GroupName ?? "")) return true;
+        return ContainsAny(name + " " + (parameter.Id ?? ""), FaceSwitchWords);
+    }
+
     static bool ContainsAny(string text, string[] words)
         => string.IsNullOrEmpty(text) == false
            && words.Any(word => text.Contains(word, StringComparison.OrdinalIgnoreCase));
@@ -928,6 +1069,12 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
         {
             OutfitMemory? memory = storage.GetObject<OutfitMemory>(memoryKey);
             if (memory == null) return;
+            // 旧版本没存模型名，或用户换过模型：旧参数/表情名对新模型可能指向完全不同的部件，直接丢弃
+            if (string.Equals(memory.ModelName, metadata.ModelName, StringComparison.OrdinalIgnoreCase) == false)
+            {
+                AlifeLog.LogInformation($"[桌宠] 外观与表演记忆属于其他模型（{memory.ModelName ?? "未记录"}），已重置");
+                return;
+            }
             foreach (KeyValuePair<string, int> entry in memory.States)
                 states[entry.Key] = entry.Value;
             autoPerformance = memory.AutoPerformance;
@@ -945,6 +1092,7 @@ public sealed class OutfitModule(PetBridge bridge, PetModelMetadata metadata, St
         try
         {
             storage.SetObject(memoryKey, new OutfitMemory {
+                ModelName = metadata.ModelName,
                 States = new Dictionary<string, int>(states, StringComparer.OrdinalIgnoreCase),
                 AutoPerformance = autoPerformance,
                 Expression = pinnedExpression,

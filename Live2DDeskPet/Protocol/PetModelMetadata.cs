@@ -36,6 +36,9 @@ public record ExpressionFileItem(string? Name, string? File)
 
     /// <summary>每个参数被写成的目标值（换装类单参数开关要知道「开」到底是 1 还是 3）。</summary>
     public Dictionary<string, double> Values { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>模型作者在 VTube Studio 热键表里给这个表情起的名字（比文件名更好懂，可为空）。</summary>
+    public string? Label { get; set; }
 }
 
 /// <summary>动作文件与其实际改写的参数 ID、时长。</summary>
@@ -45,6 +48,9 @@ public record MotionFileItem(string Group, int Index, string? Name, string? File
 
     /// <summary>动作时长（秒），0 表示未知。</summary>
     public double Duration { get; set; }
+
+    /// <summary>模型作者在 VTube Studio 热键表里给这个动作起的名字（如「举手打开」，可为空）。</summary>
+    public string? Label { get; set; }
 }
 
 #endregion
@@ -68,6 +74,19 @@ public class PetModelMetadata
     /// <summary>未登记资源合并后生成的文件名（放在模型目录内，相对路径才能照常解析）。</summary>
     public const string MergedFileName = "_tsumi.merged.model3.json";
 
+    /// <summary>按模型隐藏部件的可选配置文件（放在模型目录内，JSON 字符串数组，如 ["Part46"]）。</summary>
+    public const string HidePartsFileName = "_tsumi.hideparts.json";
+
+    /// <summary>
+    /// 已知模型的兼容修正：moc3 SHA-256 → 需要隐藏 color pass 的 drawable 下标。
+    /// 用于屏蔽部分模型里「遮罩素材被当普通图层画出来」的黑块（例如大肥鱼/DeepSeek 免费公皮鼻子的 513、514）。
+    /// 按文件哈希匹配，所有拿到同一份 moc3 的用户都会自动生效，不依赖本地配置。
+    /// </summary>
+    static readonly Dictionary<string, string[]> KnownMaskArtDrawables = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["B708E7953DB9DEEB5BF783643255DEE1F3BF20D24786BC287E72D07E1B1052E6"] = new[] { "513", "514" },
+    };
+
     /// <summary>未登记动作归入的组名。</summary>
     public const string ExtraMotionGroup = "额外动作";
 
@@ -83,6 +102,9 @@ public class PetModelMetadata
 
     /// <summary>每帧强制固定的参数值（水印等）。</summary>
     public List<ParamPin> Pins { get; private set; } = new();
+
+    /// <summary>需要隐藏的部件 ID（模型目录下的 _tsumi.hideparts.json，用于屏蔽多余贴片/遮挡）。</summary>
+    public List<string> HideParts { get; private set; } = new();
 
     /// <summary>每个动作的自循环与时长（读自动作文件 Meta）：循环的天然"保持"，一次性动作靠按时长重发来保持。</summary>
     public Dictionary<string, (bool Loop, double Duration)> MotionMeta { get; private set; } = new();
@@ -129,6 +151,7 @@ public class PetModelMetadata
         Motions = other.Motions;
         Interactions = other.Interactions;
         Pins = other.Pins;
+        HideParts = other.HideParts;
         MotionMeta = other.MotionMeta;
         ModelDirectory = other.ModelDirectory;
         ModelName = other.ModelName;
@@ -314,10 +337,17 @@ public class PetModelMetadata
             ParseDisplayInfo(root, modelJsonDirectory, metadata, options);
             ParseAnimationFiles(modelJsonDirectory, metadata);
             ParsePhysicsOutputs(root, modelJsonDirectory, metadata);
+            ApplyVtsHotkeyLabels(modelJsonDirectory, metadata);
 
             // 水印：模型自带的水印表情只写了参数，得每帧把参数固定住才真的不出现
             if (hideWatermark)
                 metadata.Pins = ResolveWatermarkPins(modelJsonDirectory, watermarkOverride);
+
+            // 可选：模型目录里放 _tsumi.hideparts.json（部件 ID 或 drawable 下标），按配置隐藏多余贴片
+            metadata.HideParts = ResolveHideParts(modelJsonDirectory);
+
+            // 已知模型：按 moc3 哈希自动隐藏「遮罩素材」的 color pass，所有用户同样生效
+            ApplyKnownMaskArtFix(metadata, modelJsonDirectory, root);
         }
         catch (Exception e)
         {
@@ -423,6 +453,67 @@ public class PetModelMetadata
     }
 
     /// <summary>
+    /// 读取模型目录里 VTube Studio 的 *.vtube.json 热键表，把作者给表情/动作起的名字带进元数据。
+    /// 热键是模型作者自己维护的语义表，比文件名更可靠（「猫猫玩偶」「抚胸手打开」这类文件名看不出用途）。
+    /// 找不到、格式不认识或解析失败就静默跳过，不猜、不改模型。
+    /// </summary>
+    static void ApplyVtsHotkeyLabels(string modelJsonDirectory, PetModelMetadata metadata)
+    {
+        if (metadata.ExpressionFiles.Count == 0 && metadata.MotionFiles.Count == 0) return;
+
+        string? vtsPath = EnumerateFilesRecursively(modelJsonDirectory, "*.vtube.json").FirstOrDefault();
+        if (vtsPath == null) return;
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(vtsPath));
+            if (doc.RootElement.TryGetProperty("Hotkeys", out JsonElement hotkeys) == false
+                || hotkeys.ValueKind != JsonValueKind.Array)
+                return;
+
+            Dictionary<string, string> expressionLabels = new(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, string> motionLabels = new(StringComparer.OrdinalIgnoreCase);
+            foreach (JsonElement hotkey in hotkeys.EnumerateArray())
+            {
+                string? name = hotkey.TryGetProperty("Name", out JsonElement nameProp) ? nameProp.GetString() : null;
+                string? action = hotkey.TryGetProperty("Action", out JsonElement actionProp) ? actionProp.GetString() : null;
+                string? file = hotkey.TryGetProperty("File", out JsonElement fileProp) ? fileProp.GetString() : null;
+                if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(file)) continue;
+
+                string stem = Stem(file);
+                if (string.IsNullOrEmpty(stem)) continue;
+                if (action is { Length: > 0 } && action.Contains("Expression", StringComparison.OrdinalIgnoreCase))
+                    expressionLabels.TryAdd(stem, name.Trim());
+                else if (string.Equals(action, "TriggerAnimation", StringComparison.OrdinalIgnoreCase))
+                    motionLabels.TryAdd(stem, name.Trim());
+            }
+
+            int labeled = 0;
+            foreach (ExpressionFileItem expression in metadata.ExpressionFiles)
+            {
+                if (string.IsNullOrEmpty(expression.File)) continue;
+                if (expressionLabels.TryGetValue(Stem(expression.File), out string? label) == false) continue;
+                expression.Label = label;
+                labeled++;
+            }
+            foreach (MotionFileItem motion in metadata.MotionFiles)
+            {
+                if (string.IsNullOrEmpty(motion.File)) continue;
+                if (motionLabels.TryGetValue(Stem(motion.File), out string? label) == false) continue;
+                motion.Label = label;
+                labeled++;
+            }
+
+            if (labeled > 0)
+                AlifeLog.LogInformation($"[桌宠] 读取 VTS 热键表：{labeled} 个表情/动作使用作者命名（{Path.GetFileName(vtsPath)}）");
+        }
+        catch (Exception e)
+        {
+            AlifeLog.LogWarning($"[桌宠] VTS 热键表解析失败：{Path.GetFileName(vtsPath)}\n{e.Message}");
+        }
+    }
+
+    /// <summary>
     /// 水印参数：模型目录里若带"水印"表情（如 水印.exp3.json），取其参数与值每帧固定，水印即不再出现。
     /// 找不到水印表情就返回空——不猜、不乱动模型。
     /// </summary>
@@ -478,6 +569,76 @@ public class PetModelMetadata
         }
 
         static string Describe(List<ParamPin> pins) => string.Join("、", pins.Select(p => $"{p.Id}={p.Value}"));
+    }
+
+    /// <summary>
+    /// 按模型隐藏部件：读模型目录下的 <see cref="HidePartsFileName"/>。
+    /// 数组元素可以是部件 ID 字符串（如 "Part46"），也可以是 drawable 下标数字（如 513）；
+    /// 数字用于只隐藏「遮罩素材」本身、保留被遮罩的鼻子/高光。文件不存在就返回空，不猜、不改模型。
+    /// </summary>
+    static List<string> ResolveHideParts(string modelJsonDirectory)
+    {
+        string path = Path.Combine(modelJsonDirectory, HidePartsFileName);
+        if (File.Exists(path) == false) return new();
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(path));
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) return new();
+
+            List<string> parts = new();
+            foreach (JsonElement item in doc.RootElement.EnumerateArray())
+            {
+                string? id = null;
+                if (item.ValueKind == JsonValueKind.String)
+                    id = item.GetString()?.Trim();
+                else if (item.ValueKind == JsonValueKind.Number && item.TryGetInt32(out int drawableIndex))
+                    id = drawableIndex.ToString();
+                if (string.IsNullOrEmpty(id) == false && parts.Contains(id) == false)
+                    parts.Add(id);
+            }
+            if (parts.Count > 0)
+                AlifeLog.LogInformation($"[桌宠] 按配置隐藏部件/drawable（{HidePartsFileName}）：{string.Join("、", parts)}");
+            return parts;
+        }
+        catch (Exception e)
+        {
+            AlifeLog.LogWarning($"[桌宠] 隐藏部件配置解析失败：{HidePartsFileName}\n{e}");
+            return new();
+        }
+    }
+
+    /// <summary>
+    /// 已知模型：按 moc3 SHA-256 命中内置兼容表，把「遮罩素材」的 drawable 加入隐藏列表。
+    /// 这样同一份免费分发的模型，其他用户不需要手工放 _tsumi.hideparts.json 也能自动生效。
+    /// </summary>
+    static void ApplyKnownMaskArtFix(PetModelMetadata metadata, string modelJsonDirectory, JsonElement root)
+    {
+        try
+        {
+            JsonElement refs = root.TryGetProperty("FileReferences", out JsonElement fileRefs) ? fileRefs : root;
+            if (refs.TryGetProperty("Moc", out JsonElement mocProp) == false || mocProp.ValueKind != JsonValueKind.String)
+                return;
+            string? mocRelative = mocProp.GetString();
+            if (string.IsNullOrEmpty(mocRelative)) return;
+
+            string mocPath = Path.Combine(modelJsonDirectory, mocRelative);
+            if (File.Exists(mocPath) == false) return;
+
+            string hash;
+            using (FileStream fs = File.OpenRead(mocPath))
+            using (System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create())
+                hash = Convert.ToHexString(sha.ComputeHash(fs));
+
+            if (KnownMaskArtDrawables.TryGetValue(hash, out string[]? indices) == false) return;
+            foreach (string id in indices)
+                if (metadata.HideParts.Contains(id) == false) metadata.HideParts.Add(id);
+            AlifeLog.LogInformation($"[桌宠] 已知模型兼容修正（{Path.GetFileName(mocPath)}）：隐藏 drawable {string.Join("、", indices)}");
+        }
+        catch (Exception e)
+        {
+            AlifeLog.LogWarning($"[桌宠] 已知模型兼容修正失败：{e.Message}");
+        }
     }
 
     /// <summary>读取 model3.json 的 Groups（LipSync / EyeBlink...）。</summary>

@@ -91,6 +91,13 @@ public sealed class EmbodimentModule : IPetModule, IDisposable
         EmotionLive2DPetConfig config = configContext.Current;
         if (metadata == null) return;
 
+        // 表情文件里的参数 ID（key4/Clothes1…）本身没有语义，把 cdi3 的名字一起下发给前端，
+        // 这样即使表情名是 Exp01，也能按参数名认出「爱心眼 / 黑脸 / 圈圈眼」。
+        Dictionary<string, string> parameterNames = new(StringComparer.OrdinalIgnoreCase);
+        foreach (CdiParameter parameter in metadata.Parameters)
+            if (parameter.Id is { Length: > 0 } id)
+                parameterNames.TryAdd(id, parameter.Name ?? "");
+
         bridge.SendMessage("embodied_settings", new {
             modelName = metadata.ModelName,
             displayName = metadata.DisplayName,
@@ -110,16 +117,25 @@ public sealed class EmbodimentModule : IPetModule, IDisposable
             }).ToArray(),
             expressions = metadata.ExpressionFiles.Select(e => new {
                 name = e.Name,
+                label = e.Label,
                 file = e.File,
-                @params = e.Params
+                @params = e.Params,
+                paramNames = e.Params
+                    .Select(id => parameterNames.TryGetValue(id, out string? name) ? (name ?? "") : "")
+                    .Where(name => name.Length > 0)
+                    .ToArray()
             }).ToArray(),
             motions = metadata.MotionFiles.Select(m => new {
                 group = m.Group,
                 index = m.Index,
                 name = m.Name,
+                label = m.Label,
                 file = m.File,
                 @params = m.Params,
-                duration = m.Duration
+                duration = m.Duration,
+                loop = m.Name is { Length: > 0 } motionName
+                    && metadata.MotionMeta.TryGetValue(motionName, out (bool Loop, double Duration) motionMeta)
+                    && motionMeta.Loop
             }).ToArray(),
             lipSyncIds = metadata.LipSyncParameterIds,
             // 用户在「表情校准」面板里手动调的通道倍率（按模型记忆），1 = 完全自动校准
@@ -218,10 +234,23 @@ public sealed class EmbodimentModule : IPetModule, IDisposable
     public void PlayMotion(string group, int index)
     {
         if (string.IsNullOrWhiteSpace(group)) return;
+
+        // 原生动作演一遍就回默认：这些 motion3 多数声明了 Loop，播完不主动停会一直保持抬手/换道具的状态
+        PetModelMetadata? metadata = modelContext.Metadata;
+        double autoStop = 0;
+        string? name = metadata?.Motions.FirstOrDefault(kv => kv.Value.Group == group && kv.Value.Index == index).Key;
+        if (name != null && metadata!.MotionMeta.TryGetValue(name, out (bool Loop, double Duration) meta)
+            && meta.Duration > 0.5)
+            autoStop = Math.Min(meta.Duration + 0.3, 20);
+        MotionFileItem? motionFile = metadata?.MotionFiles.FirstOrDefault(file =>
+            file.Group == group && file.Index == index);
+
         bridge.SendMessage("native_motion", new {
             group,
             index = Math.Max(0, index),
-            priority = "force"
+            priority = "force",
+            autoStopSeconds = autoStop,
+            @params = motionFile?.Params ?? new List<string>()
         });
     }
 }

@@ -140,6 +140,14 @@ public class GestureInteractionModule : IPetModule, IDisposable
             if (r.width <= 0 || r.height <= 0) continue;
             items.push({id: el.id, x: r.left, y: r.top, w: r.width, h: r.height});
         }
+        // 整条移动/缩放按钮带作为一个区域上报：按钮之间有 6px 间隙，逐个上报时
+        // 鼠标横移经过间隙会离开可交互区，悬停展开的菜单会立刻收起（表现为「按钮点不到」）。
+        var strip = document.getElementById('pet-controls');
+        if (strip) {
+            var sr = strip.getBoundingClientRect();
+            if (sr.width > 0 && sr.height > 0)
+                items.push({id: 'pet-controls', x: sr.left, y: sr.top, w: sr.width, h: sr.height});
+        }
         postMessage({type:'ui_bounds', items: items});
     }
     // 换装等其他模块的面板变化后也能复用这套穿透矩形上报
@@ -705,8 +713,9 @@ public class GestureInteractionModule : IPetModule, IDisposable
 
     // Alife 5 宿主删除 Electron，全局热键改用 Win32 RegisterHotKey 实现（MOD_CONTROL|MOD_ALT + 按键）。
     // 同一热键二次注册会返回失败，这里静默忽略即可；注销在 Dispose 统一处理。
-    const uint MOD_ALT = 0x0001, MOD_CONTROL = 0x0002;
+    const uint MOD_ALT = 0x0001, MOD_CONTROL = 0x0002, MOD_SHIFT = 0x0004;
     const uint WM_HOTKEY = 0x0312;
+    const int VK_F12 = 0x7B;
     const int HWND_MESSAGE = -3;
     static IntPtr msgWnd;
     static Dictionary<int, Action> hotkeyHandlers = new();
@@ -714,7 +723,7 @@ public class GestureInteractionModule : IPetModule, IDisposable
     // 窗口类注册后系统只保留函数指针，必须用静态字段持有托管委托，否则被 GC 回收时会崩
     static readonly WndProcDelegate WndProcRef = WndProc;
 
-    static bool RegisterGlobalHotkey(int key, Action action)
+    static bool RegisterGlobalHotkey(int key, Action action, uint modifiers = MOD_CONTROL | MOD_ALT)
     {
         // 用消息窗口（HWND_MESSAGE）承载通知，不侵入主线程窗口
         if (msgWnd == IntPtr.Zero)
@@ -726,7 +735,7 @@ public class GestureInteractionModule : IPetModule, IDisposable
             msgWnd = CreateWindowExW(0, cls, "PetHotkey", 0, 0, 0, 0, 0, HWND_MESSAGE, IntPtr.Zero, hInstance, IntPtr.Zero);
         }
         int id = nextHotkeyId++;
-        if (!RegisterHotKey(msgWnd, id, MOD_CONTROL | MOD_ALT, (uint)key)) return false;
+        if (!RegisterHotKey(msgWnd, id, modifiers, (uint)key)) return false;
         hotkeyHandlers[id] = action;
         return true;
     }
@@ -762,9 +771,33 @@ public class GestureInteractionModule : IPetModule, IDisposable
         {
             RegisterKey("P", () => { if (hub.IsOn("hotkey")) hub.Report("哥哥用热键戳了我一下"); });
             RegisterKey("M", () => { if (hub.IsOn("hotkey")) hub.Report("哥哥用热键让我安静一会儿"); });
+
+            // Ctrl+Alt+H 常被其他桌宠（3D 桌宠）或输入法/截图工具占用，失败时自动降级，
+            // 保证用户仍有一个不用找托盘的显隐入口。
+            string? hotkeyHint = null;
             hotkeyHideRegistered = RegisterKey("H", () => HidePet(!petHidden));
             if (!hotkeyHideRegistered)
-                AlifeLog.LogWarning("[Live2D桌宠] 显隐热键未注册，请用系统托盘的「显示 / 隐藏」唤回桌宠");
+            {
+                hotkeyHideRegistered = RegisterKey("H", () => HidePet(!petHidden), MOD_CONTROL | MOD_ALT | MOD_SHIFT);
+                if (hotkeyHideRegistered)
+                {
+                    AlifeLog.LogInformation("[Live2D桌宠] Ctrl+Alt+H 已被其他程序占用，显隐热键改用 Ctrl+Alt+Shift+H");
+                    hotkeyHint = "Ctrl+Alt+H 被占用，显隐键改用 Ctrl+Alt+Shift+H";
+                }
+            }
+            if (!hotkeyHideRegistered)
+            {
+                hotkeyHideRegistered = RegisterGlobalHotkey(VK_F12, () => HidePet(!petHidden));
+                if (hotkeyHideRegistered)
+                {
+                    AlifeLog.LogInformation("[Live2D桌宠] Ctrl+Alt+H / Shift+H 均被占用，显隐热键改用 Ctrl+Alt+F12");
+                    hotkeyHint = "Ctrl+Alt+H 被占用，显隐键改用 Ctrl+Alt+F12";
+                }
+            }
+            if (!hotkeyHideRegistered)
+                AlifeLog.LogWarning("[Live2D桌宠] 显隐热键未注册（Ctrl+Alt+H、Shift+H、F12 都被占用），请用系统托盘的「显示 / 隐藏」唤回桌宠");
+            else if (hotkeyHint != null)
+                bridge.SendMessage("pet_hint", new { text = hotkeyHint, ms = 6000 });
         }
         catch (Exception e)
         {
@@ -772,9 +805,9 @@ public class GestureInteractionModule : IPetModule, IDisposable
         }
     }
 
-    bool RegisterKey(string ch, Action callback)
+    bool RegisterKey(string ch, Action callback, uint modifiers = MOD_CONTROL | MOD_ALT)
     {
-        try { return RegisterGlobalHotkey(char.ToUpperInvariant(ch[0]), callback); }
+        try { return RegisterGlobalHotkey(char.ToUpperInvariant(ch[0]), callback, modifiers); }
         catch (Exception e)
         {
             AlifeLog.LogWarning("桌宠热键注册失败(Ctrl+Alt+" + ch + "): " + e.Message);

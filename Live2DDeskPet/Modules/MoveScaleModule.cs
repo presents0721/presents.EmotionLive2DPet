@@ -6,9 +6,10 @@ namespace presents.EmotionLive2DPet;
 
 /// <summary>
 /// 移动/缩放模块：在右下角提供一个圆形控制按钮，悬停时展开二级菜单，
-/// 菜单包含 移动 / 缩放 / 帮助 三个圆形按钮。
-/// 移动按钮拖拽移动桌宠、缩放按钮拖拽缩放桌宠；双击对应按钮只重置位移或只重置缩放。
-/// 帮助按钮悬停显示操作指南。用户设置的缩放/偏移通过 <see cref="StorageSystem"/> 持久化，
+/// 菜单包含 移动 / 缩放 / 高度 三个圆形按钮。
+/// 移动按钮拖拽移动桌宠、缩放按钮拖拽缩放桌宠；双击对应按钮只重置位移或只重置缩放；
+/// 高度按钮打开模型高度倍数面板（可点 ×、点面板外或按 Esc 关闭）。
+/// 用户设置的缩放/偏移通过 <see cref="StorageSystem"/> 持久化，
 /// 桌宠就绪时恢复（参考鼠标穿透模块的存储方式）。
 /// </summary>
 /// <summary>用户设置的模型缩放与偏移（持久化）。</summary>
@@ -48,7 +49,7 @@ public class MoveScaleModule : IPetModule, IDisposable
     display:flex; flex-direction:row; align-items:center; gap:6px;
     opacity:0; pointer-events:none; transition:opacity 0.2s;
 }
-#pet-controls:hover #pet-menu, body.pet-dragging #pet-menu, body.pet-height-open #pet-menu {
+#pet-controls:hover #pet-menu, body.pet-dragging #pet-menu, body.pet-height-open #pet-menu, body.pet-menu-open #pet-menu {
     opacity:1; pointer-events:auto;
 }
 .pet-item {
@@ -66,19 +67,8 @@ public class MoveScaleModule : IPetModule, IDisposable
 #pet-move-btn { cursor:move; }
 #pet-scale-btn { cursor:nwse-resize; }
 
-#pet-guide {
-    position:fixed; right:88px; bottom:8px; width:190px;
-    background:rgba(0,0,0,0.65);
-    backdrop-filter:blur(8px); color:white;
-    border-radius:8px; padding:10px 12px; font-size:12px; line-height:1.7;
-    border:1px solid rgba(255,255,255,0.15);
-    box-shadow:0 4px 12px rgba(0,0,0,0.3);
-    opacity:0; pointer-events:none; transition:opacity 0.2s; z-index:2200;
-}
-#pet-guide.show { opacity:1; }
-
 #pet-height-panel {
-    position:fixed; right:88px; bottom:52px; width:210px;
+    position:fixed; right:88px; bottom:88px; width:210px;
     background:rgba(0,0,0,0.68);
     backdrop-filter:blur(8px); color:white;
     border-radius:8px; padding:10px 12px; font-size:12px;
@@ -87,7 +77,14 @@ public class MoveScaleModule : IPetModule, IDisposable
     opacity:0; pointer-events:none; transition:opacity 0.2s; z-index:2200;
 }
 #pet-height-panel.show { opacity:1; pointer-events:auto; }
-#pet-height-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+#pet-height-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; gap:8px; }
+#pet-height-title { flex:1; }
+#pet-height-right { display:flex; align-items:center; gap:6px; }
+#pet-height-close {
+    background:transparent; border:0; color:rgba(255,255,255,0.72);
+    font-size:15px; line-height:1; cursor:pointer; padding:0 2px;
+}
+#pet-height-close:hover { color:#fff; }
 #pet-height-panel input[type=range] { width:100%; accent-color:#7ec8ff; }
 #pet-height-foot { display:flex; justify-content:space-between; align-items:center; margin-top:6px; color:rgba(255,255,255,0.6); }
 #pet-height-reset {
@@ -99,11 +96,6 @@ public class MoveScaleModule : IPetModule, IDisposable
     public string HtmlCode => @"
 <div id='pet-controls'>
     <div id='pet-menu'>
-        <div id='pet-help-btn' class='pet-item' title='操作指南'>
-            <svg viewBox='0 0 24 24' width='14' height='14' fill='currentColor'>
-                <path d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H8c0-2.21 1.79-4 4-4s4 1.79 4 4c0 .88-.36 1.68-.93 2.25z'/>
-            </svg>
-        </div>
         <div id='pet-height-btn' class='pet-item' title='调整模型高度倍数'>
             <svg viewBox='0 0 24 24' width='14' height='14' fill='currentColor'>
                 <path d='M12 2l3 3h-2v5h-2V5H9l3-3zm0 20l-3-3h2v-5h2v5h2l-3 3zM4 12h16v-1H4v1z'/>
@@ -128,8 +120,11 @@ public class MoveScaleModule : IPetModule, IDisposable
 </div>
 <div id='pet-height-panel'>
     <div id='pet-height-head'>
-        <span>模型高度（相对窗口高度）</span>
-        <span id='pet-height-value'>110%</span>
+        <span id='pet-height-title'>模型高度（相对窗口高度）</span>
+        <span id='pet-height-right'>
+            <span id='pet-height-value'>110%</span>
+            <button id='pet-height-close' title='关闭'>&#10005;</button>
+        </span>
     </div>
     <input id='pet-height-range' type='range' min='30' max='250' step='1' value='110'>
     <div id='pet-height-foot'>
@@ -137,26 +132,23 @@ public class MoveScaleModule : IPetModule, IDisposable
         <button id='pet-height-reset'>重置 110%</button>
     </div>
 </div>
-<div id='pet-guide'>
-    <b>操作指南</b>
-    <div>&#9995; 移动按钮：拖拽移动桌宠，双击重置位移</div>
-    <div>&#8657; 缩放按钮：拖拽缩放桌宠，双击重置缩放</div>
-    <div>&#8617; 高度按钮：拖动滑块调整模型高度倍数</div>
-    <div>&#10067; 帮助按钮：查看本指南</div>
-</div>
 ";
     public string JsCode => @"
 (function() {
-    var guide = document.getElementById('pet-guide');
-    var helpBtn = document.getElementById('pet-help-btn');
-    var guideHover = false;
-
-    function showGuide() { guide.classList.add('show'); }
-    function hideGuide() { if (!guideHover) guide.classList.remove('show'); }
-
-    if (helpBtn) {
-        helpBtn.addEventListener('mouseenter', function() { guideHover = true; showGuide(); });
-        helpBtn.addEventListener('mouseleave', function() { guideHover = false; hideGuide(); });
+    // 菜单收起留 450ms 缓冲：按钮之间有间隙，鼠标横移时哪怕离开一帧也不会立刻把菜单收掉
+    var controls = document.getElementById('pet-controls');
+    var menuTimer = 0;
+    function openMenu() {
+        if (menuTimer) { clearTimeout(menuTimer); menuTimer = 0; }
+        document.body.classList.add('pet-menu-open');
+    }
+    function scheduleCloseMenu() {
+        if (menuTimer) clearTimeout(menuTimer);
+        menuTimer = setTimeout(function() { menuTimer = 0; document.body.classList.remove('pet-menu-open'); }, 450);
+    }
+    if (controls) {
+        controls.addEventListener('mouseenter', openMenu);
+        controls.addEventListener('mouseleave', scheduleCloseMenu);
     }
 
     function sendEnd(type) {
@@ -227,17 +219,35 @@ public class MoveScaleModule : IPetModule, IDisposable
     // 模型高度倍数：滑块实时改，松手才写盘
     var heightPanel = document.getElementById('pet-height-panel');
     var heightBtn = document.getElementById('pet-height-btn');
+    var heightClose = document.getElementById('pet-height-close');
     var heightRange = document.getElementById('pet-height-range');
     var heightValue = document.getElementById('pet-height-value');
     var heightReset = document.getElementById('pet-height-reset');
 
+    function setHeightPanel(open) {
+        if (!heightPanel) return;
+        heightPanel.classList.toggle('show', open);
+        // 面板开着时菜单不收起，否则移过去调滑块时菜单（含高度按钮）会自己消失
+        document.body.classList.toggle('pet-height-open', open);
+    }
+
     if (heightBtn && heightPanel) {
         heightBtn.addEventListener('click', function() {
-            heightPanel.classList.toggle('show');
-            // 面板开着时菜单不收起，否则移过去调滑块时菜单（含高度按钮）会自己消失
-            document.body.classList.toggle('pet-height-open', heightPanel.classList.contains('show'));
+            setHeightPanel(!heightPanel.classList.contains('show'));
         });
     }
+    if (heightClose) {
+        heightClose.addEventListener('click', function() { setHeightPanel(false); });
+    }
+    // 点面板外面或按 Esc 也能关闭，避免只能靠按钮关闭
+    document.addEventListener('pointerdown', function(e) {
+        if (!heightPanel || !heightPanel.classList.contains('show')) return;
+        if (heightPanel.contains(e.target) || (heightBtn && heightBtn.contains(e.target))) return;
+        setHeightPanel(false);
+    }, true);
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') setHeightPanel(false);
+    });
     if (heightRange) {
         heightRange.addEventListener('input', function() { applyHeightRatio(parseFloat(heightRange.value), false); });
         heightRange.addEventListener('change', function() { applyHeightRatio(parseFloat(heightRange.value), true); });

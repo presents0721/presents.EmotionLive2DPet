@@ -300,11 +300,16 @@ public partial class EmotionLive2DPet(
                 - 面板顶部「具身表演」是总开关：关掉后情绪层不再逐帧改参数，用户固定的表情、动作、服饰会原样一直保持；
                   重新打开则恢复自动情绪表演，固定的表情仍会保留、其余通道继续自动变化。
 
-                ## 使用方式（首选 PetPerform）
-                - **想让她露出表情、做动作，首选 <PetPerform emotion="happy" intensity="0.8" />。**
-                  它会用 FACS 参数逐帧合成五官（眉、眼、嘴、脸颊、泪、脸红），再叠加头部/身体小动作与口型，
-                  不依赖模型自带的 exp3 表情文件，任何情绪都能演出来。可选 emotion 见上一节。
-                - **情绪有程度、且想多变不固定时，用 <PetFace /> 直接填面部参数**（只改填了的通道，intensity 整体缩放）：
+                ## 使用方式（原生优先，合成兜底）
+                - **模型「表情 / 动作」列表里有合适的，就先用 <Expression option="..." /> / <Motion option="..." />。**
+                  作者画的爱心眼、黑脸、流泪、圈圈眼等比逐帧合成更像这个角色，不要再用 PetFace 仿一个；
+                  动作列表里的举手、挥手、竖手指等也优先用模型原生动作。
+                  例：开心且模型有「爱心眼」→ `<Expression option="爱心眼" />`；生气有「黑脸」→ `<Expression option="黑脸" />`；
+                  想做姿态切换 → `<Motion option="默认手切举手" />`。
+                - **模型没有对应表情、或需要情绪强弱变化时，再用 <PetPerform> / <PetFace> 合成：**
+                  PetPerform 会先叠加该情绪对应的原生表情（若模型有），再用 FACS 逐帧合成五官，并叠加头身动作与口型；
+                  不依赖 exp3 的模型也能演出来。可选 emotion 见上一节。
+                - **想更细腻时用 <PetFace /> 直接填面部参数**（只改填了的通道，intensity 整体缩放）：
                   可用通道：eyeOpen、eyeSquint、eyeSmile、gazeX、gazeY、browInnerUp、browDown、browOuterUp、
                   mouthSmile、mouthFrown、mouthOpen、mouthPucker、blush、tear、sweat、headX、headY、headZ。
                   例：`<PetFace emotion="happy" intensity="0.9" eyeSmile="0.8" mouthSmile="1" headZ="-0.15" seconds="3" />`
@@ -314,13 +319,17 @@ public partial class EmotionLive2DPet(
                   例：`<PetFace persona="tsundere" intensity="0.9" mouthFrown="0.55" gazeX="-0.7" seconds="4" />`
                   例（病娇）：`<PetFace persona="yandere" intensity="0.85" expression="黑脸" seconds="5" />`
                   规律：傲娇=皱眉+嘴角下撇+脸红+视线躲开+歪头；病娇=睁大眼+笑眼+内眉上抬+淡笑+歪头+泪光；
-                  每个角色的人设都不同，你可以按人设自由组合这些通道，不必依赖模型自带的表情文件。
-                - <Expression option="..." /> / <Motion option="..." /> 只是补充手段：想用模型自带的某个特定表情/动作时才用，
-                  例如 <Expression option="哭哭" />、<Motion option="动作名" />。它们只有单一形态，不如 PetPerform 灵活。
+                  每个角色的人设都不同，可以按人设自由组合这些通道；但模型列表里已有对应表情（如「黑脸」）时仍优先用它。
+                - 原生表情/动作默认演一遍就收回：表情约 5 秒（体型/换装类状态表情会一直保持），
+                  动作到自身时长后自动回默认姿势。**动作时长由你写 seconds 决定**：一般 1.5~3 秒，
+                  想让她保持这个姿势就写 0 或负数；动作卡住不回去时，面板「动作」栏有「回到默认姿势」。
                 - 想让她做一整段动作/手势用 <PetGesture name="wave" />：
                   wave 挥手、nod 点头、shakeHead 摇头、bow 鞠躬、leanIn 前倾、leanBack 后仰、
                   lookAround 张望、shrug 耸肩、handsUp 举双手、heart 比心、point 指向。
-                  模型没有手臂参数时会自动只演头身层，不会报错；情绪强烈时她也会自己挑手势，不必每句都写。
+                  模型有同名原生手势动作时会优先用原生动作；没有手臂参数时只演头身层，不会报错。
+                  情绪强烈时她也会自己挑手势，不必每句都写。
+                  注意：同一时间只有一个动作槽，一条回复里不要连续发多个 <Motion>/<PetGesture>，
+                  后一个会把前一个顶掉；表情可以和一个动作同时演，先写 <Expression> 再写 <Motion> 即可。
                   例：`<PetGesture name="wave" intensity="0.8" />`、`<PetGesture name="nod" />`。
                 - 让整只人物在窗口里动起来用 <PetEffect name="jump" />（不依赖模型参数，任何模型都能用）：
                   jump 跳一下、hop 小跳两下、bounce 连续弹跳、shake 抖动、step 横向闪开、
@@ -505,6 +514,9 @@ public partial class EmotionLive2DPet(
     object[] PinPayload() => metadata.Pins
         .Select(pin => (object)new { id = pin.Id, value = pin.Value })
         .ToArray();
+
+    /// <summary>按模型配置要隐藏的部件 ID（来自模型目录的 _tsumi.hideparts.json）。</summary>
+    string[] HidePartsPayload() => metadata.HideParts.ToArray();
 
     /// <summary>把当前配置写回配置文件（切换模型/设置页更新后持久化）。</summary>
     void PersistConfig()
@@ -767,7 +779,12 @@ public partial class EmotionLive2DPet(
         petBridge.OnMessage += Handler;
         try
         {
-            petBridge.SendMessage("load", new { url = new Uri(metadata.ModelPath).AbsoluteUri, pins = PinPayload() });
+            petBridge.SendMessage("load", new
+            {
+                url = new Uri(metadata.ModelPath).AbsoluteUri,
+                pins = PinPayload(),
+                hideParts = HidePartsPayload(),
+            });
             using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(DestroyCancellationToken);
             timeout.CancelAfter(TimeSpan.FromSeconds(30));
             return await loadedTcs.Task.WaitAsync(timeout.Token);
@@ -826,20 +843,24 @@ public partial class EmotionLive2DPet(
         if (string.IsNullOrWhiteSpace(expression)) return Task.CompletedTask;
         string wanted = expression.Trim();
 
-        string? canonical = metadata.Expressions
-            .FirstOrDefault(e => string.Equals(e, wanted, StringComparison.OrdinalIgnoreCase));
-        // 名称允许模糊匹配：模型里叫「哭哭」，AI 说「哭」也能对上
-        canonical ??= metadata.Expressions.FirstOrDefault(e =>
-            e.Contains(wanted, StringComparison.OrdinalIgnoreCase)
-            || wanted.Contains(e, StringComparison.OrdinalIgnoreCase));
+        string? canonical = ResolveExpressionName(wanted);
 
         if (canonical != null)
         {
-            expressionModule.PlayExpression(canonical, seconds);
+            // 体型/换装/姿势开关是状态，不是一次性表情：不填 seconds 时默认一直保持，
+            // 否则几秒后自动收回，用户会看到「换完体型瞬间弹回去」。
+            bool persistent = outfitModule?.IsPersistentExpression(canonical) == true;
+            double? effectiveSeconds = seconds is null && persistent ? 0 : seconds;
+            logger.LogInformation("播放原生表情 {Expression}（seconds={Seconds}）", canonical, effectiveSeconds);
+            expressionModule.PlayExpression(canonical, effectiveSeconds);
             // 自带表情多为单参数开关（如「哭哭」只开一个泪目开关），单播几乎看不出变化；
             // 同时叠加一层 FACS 情绪表演，让眉/眼/嘴/脸颊真正动起来。
+            // 把 canonical 一并传给 Perform，避免它按情绪另挑一个原生表情把刚播的顶掉。
+            // effectiveSeconds<=0 是「一直保持」，走 ExpressionModule 的 hold 通道；不要再经过 Perform，
+            // 否则具身层的 6 秒原生表情回收会把长按的表情收掉。
             string? overlay = ToEmotionKey(canonical) ?? ToEmotionKey(wanted);
-            if (overlay != null) embodiment.Perform(overlay, 0.8);
+            bool hold = effectiveSeconds is double value && value <= 0;
+            if (overlay != null && hold == false) embodiment.Perform(overlay, 0.8, expression: canonical);
             return Task.CompletedTask;
         }
 
@@ -887,10 +908,63 @@ public partial class EmotionLive2DPet(
         return null;
     }
 
+    /// <summary>表情名解析：模型原名、作者 VTS 热键名（如「屑」）、模糊包含都接受。</summary>
+    string? ResolveExpressionName(string wanted)
+    {
+        string? exact = metadata.Expressions.FirstOrDefault(e =>
+            string.Equals(e, wanted, StringComparison.OrdinalIgnoreCase));
+        if (exact != null) return exact;
+
+        string? byLabel = metadata.ExpressionFiles.FirstOrDefault(f =>
+            string.Equals(f.Label, wanted, StringComparison.OrdinalIgnoreCase))?.Name;
+        if (byLabel != null) return byLabel;
+
+        // 名称允许模糊匹配：模型里叫「哭哭」，AI 说「哭」也能对上
+        string? contains = metadata.Expressions.FirstOrDefault(e =>
+            e.Contains(wanted, StringComparison.OrdinalIgnoreCase)
+            || wanted.Contains(e, StringComparison.OrdinalIgnoreCase));
+        if (contains != null) return contains;
+
+        return metadata.ExpressionFiles.FirstOrDefault(f =>
+            f.Label is { Length: > 0 } label
+            && (label.Contains(wanted, StringComparison.OrdinalIgnoreCase)
+                || wanted.Contains(label, StringComparison.OrdinalIgnoreCase)))?.Name;
+    }
+
+    /// <summary>动作名解析：模型原名、作者 VTS 热键名（如「抚胸手打开」）、模糊包含都接受。</summary>
+    bool TryResolveMotion(string wanted, out (string Group, int Index) target)
+    {
+        if (metadata.Motions.TryGetValue(wanted, out target)) return true;
+
+        MotionFileItem? byLabel = metadata.MotionFiles.FirstOrDefault(f =>
+            string.Equals(f.Label, wanted, StringComparison.OrdinalIgnoreCase));
+        if (byLabel?.Name is { Length: > 0 } labelName && metadata.Motions.TryGetValue(labelName, out target)) return true;
+
+        string? fuzzy = metadata.Motions.Keys.FirstOrDefault(key =>
+            key.Contains(wanted, StringComparison.OrdinalIgnoreCase)
+            || wanted.Contains(key, StringComparison.OrdinalIgnoreCase));
+        if (fuzzy != null && metadata.Motions.TryGetValue(fuzzy, out target)) return true;
+
+        MotionFileItem? labelFuzzy = metadata.MotionFiles.FirstOrDefault(f =>
+            f.Label is { Length: > 0 } label
+            && (label.Contains(wanted, StringComparison.OrdinalIgnoreCase)
+                || wanted.Contains(label, StringComparison.OrdinalIgnoreCase)));
+        if (labelFuzzy?.Name is { Length: > 0 } fuzzyName && metadata.Motions.TryGetValue(fuzzyName, out target)) return true;
+
+        target = default;
+        return false;
+    }
+
     public Task ShowMotion(string? motion, double? seconds = null)
     {
         if (string.IsNullOrWhiteSpace(motion)) return Task.CompletedTask;
-        if (metadata.Motions.TryGetValue(motion, out (string Group, int Index) target) == false) return Task.CompletedTask;
+        if (TryResolveMotion(motion.Trim(), out (string Group, int Index) target) == false)
+        {
+            logger.LogInformation("动作 {Motion} 不在当前模型的动作列表里", motion);
+            return Task.CompletedTask;
+        }
+        logger.LogInformation("播放原生动作 {Motion} → {Group}#{Index}（seconds={Seconds}）",
+            motion, target.Group, target.Index, seconds);
         expressionModule.PlayMotion(target.Group, target.Index, seconds);
         return Task.CompletedTask;
     }
@@ -1086,7 +1160,7 @@ public partial class EmotionLive2DPet(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("让桌宠做出具身表演：指定情绪并自动生成表情、头部/身体动作与口型。emotion 可选 happy/sad/angry/surprised/confused/shy/relaxed/excited；motion 与 expression 可留空由模型自动选择。")]
+    [Description("让桌宠做出具身表演：优先播放该情绪对应的模型原生表情，再用 FACS 合成五官、头部/身体动作与口型。emotion 可选 happy/sad/angry/surprised/confused/shy/relaxed/excited；motion 与 expression 填模型自带的名字时优先用原生资源。")]
     public Task PetPerform(
         [Description("情绪名称，例如 happy、shy、sad、angry、surprised、confused、relaxed")] string emotion = "happy",
         [Description("强度 0~1，默认 0.7")] double intensity = 0.7,
@@ -1096,29 +1170,30 @@ public partial class EmotionLive2DPet(
         double clamped = Math.Clamp(intensity, 0.05, 1.0);
 
         if (string.IsNullOrWhiteSpace(motion) == false
-            && metadata.Motions.TryGetValue(motion.Trim(), out (string Group, int Index) target))
+            && TryResolveMotion(motion.Trim(), out (string Group, int Index) target))
             embodiment.PlayMotion(target.Group, target.Index);
 
-        if (string.IsNullOrWhiteSpace(expression) == false)
-        {
-            string? canonical = metadata.Expressions
-                .FirstOrDefault(e => string.Equals(e, expression.Trim(), StringComparison.OrdinalIgnoreCase));
-            if (canonical != null)
-                embodiment.PlayExpression(canonical);
-        }
+        // 指定表情要交给 Perform 一起下发：否则前端会先用情绪映射挑一个别的原生表情，把刚播的表情顶掉
+        string? canonicalExpression = string.IsNullOrWhiteSpace(expression)
+            ? null
+            : ResolveExpressionName(expression.Trim());
+
+        // 体型/换装类指定表情默认保持，不要走 PetPerform 的 6 秒原生表情回收
+        if (canonicalExpression != null && outfitModule?.IsPersistentExpression(canonicalExpression) == true)
+            ShowExpression(canonicalExpression, 0);
 
         string emotionKey = ToEmotionKey(emotion) ?? emotion.Trim().ToLowerInvariant();
-        embodiment.Perform(emotionKey, clamped);
+        embodiment.Perform(emotionKey, clamped, expression: canonicalExpression);
         OnEmotionChanged(emotionKey, clamped);
         return Task.CompletedTask;
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("让她做一个整段手势或身体动作：挥手、点头、摇头、鞠躬、前倾、后仰、张望、耸肩、举双手、比心、指向。模型没有手臂参数时会自动只演头身层，不会报错。")]
+    [Description("让她做一个整段手势或身体动作：挥手、点头、摇头、鞠躬、前倾、后仰、张望、耸肩、举双手、比心、指向。模型有对应原生手势动作时会优先用原生动作；没有手臂参数时只演头身层或原生动作，不会报错。")]
     public Task PetGesture(
         [Description("动作名：wave 挥手 / nod 点头 / shakeHead 摇头 / bow 鞠躬 / leanIn 前倾 / leanBack 后仰 / lookAround 张望 / shrug 耸肩 / handsUp 举双手 / heart 比心 / point 指向")] string name = "nod",
         [Description("强度 0~1，默认 0.75")] double intensity = 0.75,
-        [Description("持续秒数，0=按动作自带时长")] double seconds = 0)
+        [Description("持续秒数，由你按场景决定；0=按动作自带时长")] double seconds = 0)
     {
         embodiment.PlayGesture(name, intensity, seconds);
         return Task.CompletedTask;
@@ -1263,11 +1338,11 @@ public partial class EmotionLive2DPet(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("表演一个表情（option 取模型表情列表中的名字）。seconds：保持多少秒后自动收回；不填=默认；填 0 或负数=一直保持")]
+    [Description("表演一个表情（option 取模型表情列表中的名字）。seconds：保持多少秒后自动收回；不填=普通表情约 5 秒，体型/换装等状态型一直保持；填 0 或负数=一直保持")]
     public Task Expression(string option, double? seconds = null) => ShowExpression(option, seconds);
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("表演一个动作（option 取模型动作列表中的名字）。seconds：保持多少秒；不填=自然播放一次；填 0 或负数=一直保持")]
+    [Description("表演一个动作（option 取模型动作列表中的名字）。seconds 由你决定：建议写 1.5~3 秒；不填=按动作自身时长演一遍后回默认；填 0 或负数=一直循环（举手/换道具这类姿势会持续保持）")]
     public Task Motion(string option, double? seconds = null) => ShowMotion(option, seconds);
 
     [XmlFunction(FunctionMode.OneShot)]

@@ -251,35 +251,54 @@ function buildExpressionMap(expressions) {
   if (!expressions?.length) return undefined;
   // 表情名没有统一规范：同一个情绪在不同模型里可能叫「黑脸 / 怒り顔 / angry_face / Angry」。
   // 这里维护一套中英日关键词本体，命中即映射；没命中的表情保持原样，不参与情绪映射。
-  // 顺序有意义：越具体、越容易误判的放前面（例如「脸红」不能先被 shy 之外的规则抢走）。
+  // 顺序有意义：越具体、越容易误判的放前面（例如「流冷汗」要先归到担心，「屑屑眼」先归到嫌弃）。
   const emotionHeuristics = [
-    [['blush', '脸红', '害羞', '害臊', '羞', '照れ', '赤面', 'embarrassed', 'shy'], 'shy'],
-    [['angry', 'anger', 'mad', 'rage', '怒', '生气', '愤怒', '黑脸', '怒り', 'おこ', 'ムカ'], 'angry'],
-    [['tears', '泪', '哭', '泣', '流泪', 'tear', 'cry', 'sad', '悲', '难过', '伤心', '泣き'], 'sad'],
+    [['blush', '脸红', '臉紅', '害羞', '害臊', '羞', '照れ', '赤面', 'embarrassed', 'shy'], 'shy'],
+    [['angry', 'anger', 'mad', 'rage', '怒', '生气', '愤怒', '黑脸', '黑臉', '怒り', 'おこ', 'ムカ'], 'angry'],
+    [['tears', '泪', '淚', '流泪', '落泪', '哭', '泣', 'tear', 'cry', 'sad', '悲', '难过', '伤心', '泣き'], 'sad'],
+    [['surprised', 'surprise', 'shock', '惊', '震驚', '震惊', 'びっくり', '驚き', '感叹号', '!'], 'surprised'],
+    // 圈圈眼/蚊香眼/＞＜ 没有现成情绪词，按 VTS 中文包的习惯归到困惑最稳
+    [['confused', 'confusion', 'question', '困惑', '疑问', '疑问符', '问号', '幽灵', 'ghost', '圈圈', '蚊香',
+      '晕', 'dizzy', 'swirl', '＞＜', '><', '加载', 'loading', 'はてな', '？', '?'], 'confused'],
+    [['disgust', 'annoyed', '嫌弃', '无语', '白眼', '屑', '嫌'], 'disgust'],
+    // 冷汗/尴尬归到担心，不能被后面的「汗」类规则抢走
+    [['worried', 'worry', 'anxious', 'anxiety', '担心', '不安', '心配', '冷汗', '汗', '尴尬', 'sweat', 'nervous'], 'concerned'],
+    [['excited', '兴奋', 'やる気', 'waku', 'excite'], 'excited'],
     // 星星眼/心心眼这类 VTS 常用表情在中文包里很常见，归到 happy 最容易被触发
     [['loveeyes', 'loveeye', 'love', 'heart', '爱心', '心心', '星星', 'star', 'sparkle', 'kira', '目星'], 'happy'],
-    [['excited', '兴奋', 'やる気', 'waku', 'excite'], 'excited'],
-    [['confused', 'confusion', 'question', '困惑', '疑问', '疑问符', '幽灵', 'ghost', '晕', 'dizzy', 'はてな', '？', '?'], 'confused'],
-    [['smile', 'happy', '开心', '微笑', '笑顔', 'にこ', '笑'], 'happy'],
-    [['surprised', 'surprise', 'shock', '惊', '震惊', 'びっくり', '驚き'], 'surprised'],
-    [['worried', 'worry', 'anxious', '担心', '不安', '心配'], 'concerned'],
+    [['smile', 'happy', 'joy', '开心', '微笑', '笑顔', 'にこ', '笑', '兔牙', '大牙'], 'happy'],
     [['sleepy', 'tired', 'sleep', '困', '睡', '累', '疲', '眠'], 'tired'],
-    [['disgust', 'annoyed', '嫌弃', '无语', '白眼', '嫌'], 'disgust'],
   ];
   const sorted = [...expressions].sort((a, b) => String(a.file).localeCompare(String(b.file)));
-  const result = {};
-  const claimed = new Set();
-  for (const { name } of sorted) {
-    const normalized = normalizeText(name);
+  // 同一个情绪可能有多个候选（「爱心眼」和「兔牙」都像开心），按命中位置打分取最贴切的那个：
+  // 表情名/热键名 > 文件名 > 参数名；越靠前的关键词越具体，分数也越高。
+  const best = new Map();
+  for (const item of sorted) {
+    const fields = [
+      { text: normalizeText(item.name || ''), bonus: 20 },
+      { text: normalizeText(item.label || ''), bonus: 20 },
+      { text: normalizeText(item.file || ''), bonus: 10 },
+      // 表情名可能是 Exp01：参数名（爱心眼/黑脸/圈圈眼）作为低权重兜底；
+      // 多参数表情会共享同一批开关参数，容易被兄弟表情的名字带偏，所以权重最低也最保守。
+      ...(item.paramNames ?? []).map((paramName) => ({ text: normalizeText(paramName), bonus: 2 })),
+    ];
     for (const [needles, emotion] of emotionHeuristics) {
-      if (claimed.has(emotion)) continue;
-      if (needles.some((needle) => normalized.includes(normalizeText(needle)))) {
-        result[emotion] = name;
-        claimed.add(emotion);
-        break;
-      }
+      let score = 0;
+      needles.forEach((needle, index) => {
+        const normalizedNeedle = normalizeText(needle);
+        if (!normalizedNeedle) return;
+        for (const field of fields) {
+          if (field.text.includes(normalizedNeedle))
+            score = Math.max(score, field.bonus + (needles.length - index));
+        }
+      });
+      if (!score) continue;
+      const current = best.get(emotion);
+      if (!current || score > current.score) best.set(emotion, { score, name: item.name });
     }
   }
+  const result = {};
+  for (const [emotion, candidate] of best) result[emotion] = candidate.name;
   return Object.keys(result).length ? result : undefined;
 }
 
@@ -679,30 +698,34 @@ function buildProfile(settings, engine) {
   // 动作名/文件名里带语义关键词的按情绪归类；没有关键词的动作进 any 池，
   // 只在情绪很强时低频抽取，避免把「待机」「场景」这类长动作当表情动作播。
   const MOTION_EMOTION_KEYWORDS = {
-    happy: ['smile', 'happy', 'joy', 'laugh', 'fun', '笑', '开心', '嬉', '喜'],
-    excited: ['excited', 'cheer', 'jump', 'yay', '兴奋', '欢呼', '嗨'],
-    surprised: ['surprise', 'shock', 'wow', '惊', '意'],
-    sad: ['sad', 'cry', 'tear', '悲', '哭', '难过', '泣'],
-    angry: ['angry', 'anger', 'mad', '怒', '生气'],
-    shy: ['shy', 'blush', '照れ', '羞', '恥'],
-    confused: ['confus', 'question', '疑问', '困惑', '?'],
-    proud: ['proud', '得意', '自信'],
-    relaxed: ['relax', 'calm', 'breath', '放松', '呼吸'],
+    happy: ['smile', 'happy', 'joy', 'laugh', 'fun', '笑', '开心', '嬉', '喜', '挥手', '招手', '打招呼', '比耶', '比心', '爱心', '转圈'],
+    excited: ['excited', 'cheer', 'jump', 'yay', '兴奋', '欢呼', '嗨', '举手', '竖指', '手指', '跳'],
+    surprised: ['surprise', 'shock', 'wow', '惊', '意', '怕', '后退'],
+    sad: ['sad', 'cry', 'tear', '悲', '哭', '难过', '泣', '垂头'],
+    angry: ['angry', 'anger', 'mad', '怒', '生气', '跺脚'],
+    shy: ['shy', 'blush', '照れ', '羞', '恥', '捂脸', '遮脸'],
+    confused: ['confus', 'question', '疑问', '困惑', '?', '挠头', '歪头'],
+    proud: ['proud', '得意', '自信', '竖指', '手指', '叉腰'],
+    relaxed: ['relax', 'calm', 'breath', '放松', '呼吸', '伸懒腰'],
     bored: ['bored', 'sleepy', '困', '无聊'],
+    concerned: ['concern', '担心', '不安', '抚胸', '捂胸', '抱胸'],
   };
   const motionEntries = motions.map((item) => ({
     group: item.group,
     index: Number(item.index) || 0,
     name: item.name || '',
+    label: item.label || '',
     file: item.file || '',
     duration: Number(item.duration) || 0,
   }));
   const emotionMotionMap = {};
   const motionPool = [];
   for (const entry of motionEntries) {
-    const haystack = normalizeText(`${entry.name} ${entry.group} ${entry.file}`);
+    const haystack = normalizeText(`${entry.name} ${entry.label} ${entry.group} ${entry.file}`);
     // 待机/场景动画不是「表情动作」，自动触发会显得莫名其妙
     if (/(idle|scene|loop|待机|场景)/.test(haystack)) continue;
+    // 「关闭/切回默认」只是把上一个姿势收回去，自动播放会把刚摆好的姿势撤掉；只留「打开/切出来」
+    if (/(关闭|關閉|切回|切默认|回默认|收起|收回|close|reset)/.test(`${entry.name} ${entry.label}`)) continue;
     motionPool.push(entry);
     for (const [emotion, words] of Object.entries(MOTION_EMOTION_KEYWORDS)) {
       if (!words.some((word) => haystack.includes(normalizeText(word)))) continue;

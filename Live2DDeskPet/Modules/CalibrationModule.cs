@@ -79,6 +79,7 @@ public sealed class CalibrationModule : IPetModule, IDisposable
 
     /// <summary>前端最近一次算出的覆盖率报告（原样 JSON，面板渲染时再解析）。</summary>
     string? reportJson;
+    string? reportModel;
 
     public CalibrationModule(PetBridge bridge, PetModelMetadata metadata, StorageSystem storage, PetStorageKey storageKey)
     {
@@ -410,7 +411,14 @@ public sealed class CalibrationModule : IPetModule, IDisposable
     {
         if (type == "loaded")
         {
-            reportJson = null;
+            // 成功加载时不要清报告：profile.js 在这条消息之前就已经发过 calibration_report，
+            // 清掉会让面板一直停在「模型尚未加载完成」。失败时才清，避免显示上一个模型的旧报告。
+            bool ok = data.TryGetProperty("ok", out JsonElement okProp) == false || okProp.ValueKind != JsonValueKind.False;
+            if (ok == false)
+            {
+                reportJson = null;
+                reportModel = null;
+            }
             return;
         }
 
@@ -419,12 +427,16 @@ public sealed class CalibrationModule : IPetModule, IDisposable
             reportJson = data.TryGetProperty("report", out JsonElement report) && report.ValueKind == JsonValueKind.Object
                 ? report.GetRawText()
                 : null;
+            reportModel = metadata.ModelName;
             SendData();
             return;
         }
 
         if (type == "calibration_pull")
         {
+            // 模块启动晚于模型首次上报，报告可能没收到：面板打开时主动让前端补发一次
+            if (string.IsNullOrEmpty(reportJson) || reportModel != metadata.ModelName)
+                bridge.SendMessage("calibration_report_request", new { });
             SendData();
             return;
         }
@@ -456,7 +468,7 @@ public sealed class CalibrationModule : IPetModule, IDisposable
         bridge.SendMessage("calibration_data", new {
             model = metadata.ModelName,
             gains = CalibrationStore.GainsFor(metadata.ModelName),
-            report = reportJson ?? "",
+            report = reportModel == metadata.ModelName ? (reportJson ?? "") : "",
         });
     }
 
